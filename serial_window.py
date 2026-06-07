@@ -1,13 +1,15 @@
 import csv
 import json
+from collections import deque
 from decimal import Decimal, InvalidOperation
 from numbers import Real
 
-from PyQt6.QtCore import QIODeviceBase
+from PyQt6.QtCore import QIODeviceBase, Qt, QTimer
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtSerialPort import QSerialPort, QSerialPortInfo
 from PyQt6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -18,6 +20,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +30,28 @@ from realtime_plot import RealtimePlot
 
 class SerialWindow(QMainWindow):
     MAX_JSON_BUFFER_CHARS = 20000
+    PLOT_REFRESH_INTERVAL_MS = 100
+    PARSED_MESSAGE_LIMIT = 12
+    LINE_COLORS = (
+        ("Teal", "#0f766e"),
+        ("Blue", "#2563eb"),
+        ("Red", "#dc2626"),
+        ("Purple", "#9333ea"),
+        ("Amber", "#ca8a04"),
+        ("Cyan", "#0891b2"),
+        ("Green", "#16a34a"),
+        ("Orange", "#ea580c"),
+        ("Black", "#111827"),
+        ("Gray", "#6b7280"),
+    )
+    LINE_STYLES = (
+        ("Solid", Qt.PenStyle.SolidLine),
+        ("Dash", Qt.PenStyle.DashLine),
+        ("Dot", Qt.PenStyle.DotLine),
+        ("Dash Dot", Qt.PenStyle.DashDotLine),
+        ("Dash Dot Dot", Qt.PenStyle.DashDotDotLine),
+    )
+    LINE_WIDTHS = (1, 2, 3, 4, 5, 6)
 
     def __init__(self):
         super().__init__()
@@ -38,14 +63,35 @@ class SerialWindow(QMainWindow):
         self.json_buffer = ""
         self.records = []
         self.channel_sample_counts = {}
+        self.plot_record_queues = {}
+        self.plot_sample_index = 0
+        self.parsed_latest_by_channel = {}
+        self.parsed_messages = deque(maxlen=self.PARSED_MESSAGE_LIMIT)
         self.current_x_key = "timestamp"
         self.current_y_key = "Freq"
         self.channel_ids = ["0012"]
         self.channel_id_inputs = []
         self.channel_inputs_layout = None
+        self.connection_dialog = None
+        self.channel_dialog = None
+        self.curve_dialog = None
+        self.plot_option_combo = None
+        self.plot_option_pages = None
+        self.line_settings_layout = None
+        self.line_style_inputs = {}
 
         self.setWindowTitle("串口数据接收与 JSON 解析绘图")
         self.resize(1180, 760)
+        self.setStyleSheet(
+            """
+            QWidget {
+                font-size: 11pt;
+            }
+            QLineEdit, QComboBox, QPushButton {
+                min-height: 26px;
+            }
+            """
+        )
 
         self.port_combo = QComboBox()
         self.baud_combo = QComboBox()
@@ -59,6 +105,12 @@ class SerialWindow(QMainWindow):
         self.status_label = QLabel("串口未打开")
         self.raw_view = QPlainTextEdit()
         self.parsed_view = QPlainTextEdit()
+        self.connection_button = QPushButton("Connection")
+        self.channel_setting_button = QPushButton("Channel Setting")
+        self.curve_setting_button = QComboBox()
+        self.curve_setting_button.setPlaceholderText("Plot Options")
+        self.curve_setting_button.addItems(("Coordinate Setting", "Line Setting"))
+        self.curve_setting_button.setCurrentIndex(-1)
         self.x_key_input = QLineEdit(self.current_x_key)
         self.key_input = QLineEdit(self.current_y_key)
         self.plot_key_button = QPushButton("绘制曲线")
@@ -79,17 +131,22 @@ class SerialWindow(QMainWindow):
         self.x_margin_input = QLineEdit("5")
         self.visible_points_input = QLineEdit("100")
         self.apply_axis_button = QPushButton("应用坐标")
+        self.apply_line_style_button = QPushButton("Apply Line Setting")
         self.axis_status_label = QLabel("纵轴自动；横轴 Scaling，右侧留白 5")
         self.plot = RealtimePlot()
         self.plot.set_channels(self.channel_ids)
         self.plot.set_title("Y=Freq / X=timestamp")
+        self.plot_timer = QTimer(self)
+        self.plot_timer.setInterval(self.PLOT_REFRESH_INTERVAL_MS)
+        self.plot_timer.timeout.connect(self.flush_plot_records)
+        self.plot_timer.start()
 
-        self._build_ui()
+        self._build_modular_ui()
         self._load_options()
         self.update_axis_input_state()
         self.refresh_ports()
 
-    def _build_ui(self):
+    def _build_legacy_ui(self):
         self.raw_view.setReadOnly(True)
         self.raw_view.setMaximumBlockCount(2000)
         self.parsed_view.setReadOnly(True)
@@ -208,6 +265,183 @@ class SerialWindow(QMainWindow):
         central.setLayout(main_layout)
         self.setCentralWidget(central)
 
+    def _build_modular_ui(self):
+        self.raw_view.setReadOnly(True)
+        self.raw_view.setMaximumBlockCount(2000)
+        self.parsed_view.setReadOnly(True)
+        self.parsed_view.setMaximumBlockCount(200)
+        self.close_button.setEnabled(False)
+
+        self.refresh_button.clicked.connect(self.refresh_ports)
+        self.open_button.clicked.connect(self.open_serial)
+        self.close_button.clicked.connect(self.close_serial)
+        self.clear_button.clicked.connect(self.clear_data)
+        self.plot_key_button.clicked.connect(self.apply_plot_key)
+        self.clear_plot_button.clicked.connect(self.confirm_clear_plot)
+        self.save_data_button.clicked.connect(self.save_plot_data)
+        self.apply_channel_count_button.clicked.connect(self.rebuild_channel_inputs)
+        self.apply_channels_button.clicked.connect(self.apply_channel_settings)
+        self.key_input.returnPressed.connect(self.apply_plot_key)
+        self.x_key_input.returnPressed.connect(self.apply_plot_key)
+        self.apply_axis_button.clicked.connect(self.apply_axis_settings)
+        self.apply_line_style_button.clicked.connect(self.apply_line_settings)
+        self.x_mode_combo.currentTextChanged.connect(self.update_axis_input_state)
+        self.connection_button.clicked.connect(self.show_connection_dialog)
+        self.channel_setting_button.clicked.connect(self.show_channel_dialog)
+        self.curve_setting_button.activated.connect(self.show_plot_option)
+
+        self.connection_dialog = QDialog(self)
+        self.connection_dialog.setWindowTitle("Connection")
+        self.connection_dialog.resize(520, 680)
+        connection_layout = QVBoxLayout(self.connection_dialog)
+
+        settings_group = QGroupBox("串口设置")
+        settings_layout = QGridLayout(settings_group)
+        settings_layout.addWidget(QLabel("串口"), 0, 0)
+        settings_layout.addWidget(self.port_combo, 0, 1)
+        settings_layout.addWidget(self.refresh_button, 0, 2)
+        settings_layout.addWidget(QLabel("波特率"), 1, 0)
+        settings_layout.addWidget(self.baud_combo, 1, 1)
+        settings_layout.addWidget(QLabel("停止位"), 2, 0)
+        settings_layout.addWidget(self.stop_bits_combo, 2, 1)
+        settings_layout.addWidget(QLabel("数据位"), 3, 0)
+        settings_layout.addWidget(self.data_bits_combo, 3, 1)
+        settings_layout.addWidget(QLabel("校验位"), 4, 0)
+        settings_layout.addWidget(self.parity_combo, 4, 1)
+
+        serial_buttons = QHBoxLayout()
+        serial_buttons.addWidget(self.open_button)
+        serial_buttons.addWidget(self.close_button)
+        serial_buttons.addWidget(self.clear_button)
+        serial_buttons.addStretch()
+        serial_buttons.addWidget(self.status_label)
+
+        raw_group = QGroupBox("串口接收原始信息")
+        raw_layout = QVBoxLayout(raw_group)
+        raw_layout.addWidget(self.raw_view)
+
+        connection_layout.addWidget(settings_group)
+        connection_layout.addLayout(serial_buttons)
+        connection_layout.addWidget(raw_group, 1)
+
+        self.channel_dialog = QDialog(self)
+        self.channel_dialog.setWindowTitle("Channel Setting")
+        self.channel_dialog.resize(420, 260)
+        channel_dialog_layout = QVBoxLayout(self.channel_dialog)
+        channel_group = QGroupBox("Channel 设置")
+        channel_layout = QVBoxLayout(channel_group)
+        channel_count_layout = QHBoxLayout()
+        channel_count_layout.addWidget(QLabel("N_channel"))
+        channel_count_layout.addWidget(self.channel_count_input)
+        channel_count_layout.addWidget(self.apply_channel_count_button)
+        channel_count_layout.addWidget(self.apply_channels_button)
+        channel_layout.addLayout(channel_count_layout)
+        self.channel_inputs_layout = QVBoxLayout()
+        channel_layout.addLayout(self.channel_inputs_layout)
+        channel_layout.addWidget(self.channel_status_label)
+        channel_dialog_layout.addWidget(channel_group)
+        self.rebuild_channel_inputs()
+
+        self.curve_dialog = QDialog(self)
+        self.curve_dialog.setWindowTitle("Plot Options")
+        self.curve_dialog.resize(640, 360)
+        curve_dialog_layout = QVBoxLayout(self.curve_dialog)
+
+        self.plot_option_pages = QStackedWidget()
+        curve_dialog_layout.addWidget(self.plot_option_pages, 1)
+
+        axis_page = QWidget()
+        axis_page_layout = QVBoxLayout(axis_page)
+        axis_group = QGroupBox("Coordinate Setting")
+        axis_layout = QGridLayout(axis_group)
+        axis_layout.addWidget(QLabel("Y 下限"), 0, 0)
+        axis_layout.addWidget(self.y_min_input, 0, 1)
+        axis_layout.addWidget(QLabel("Y 上限"), 0, 2)
+        axis_layout.addWidget(self.y_max_input, 0, 3)
+        axis_layout.addWidget(QLabel("X 模式"), 1, 0)
+        axis_layout.addWidget(self.x_mode_combo, 1, 1)
+        axis_layout.addWidget(QLabel("右侧留白"), 1, 2)
+        axis_layout.addWidget(self.x_margin_input, 1, 3)
+        axis_layout.addWidget(QLabel("X 下限"), 2, 0)
+        axis_layout.addWidget(self.x_min_input, 2, 1)
+        axis_layout.addWidget(QLabel("X 上限"), 2, 2)
+        axis_layout.addWidget(self.x_max_input, 2, 3)
+        axis_layout.addWidget(QLabel("显示点数"), 3, 0)
+        axis_layout.addWidget(self.visible_points_input, 3, 1)
+        axis_layout.addWidget(self.axis_status_label, 4, 0, 1, 4)
+        axis_layout.addWidget(self.apply_axis_button, 5, 0, 1, 4)
+        axis_layout.setColumnStretch(1, 1)
+        axis_layout.setColumnStretch(3, 1)
+        axis_page_layout.addWidget(axis_group)
+        axis_page_layout.addStretch()
+        self.plot_option_pages.addWidget(axis_page)
+
+        line_page = QWidget()
+        line_page_layout = QVBoxLayout(line_page)
+        line_group = QGroupBox("Line Setting")
+        self.line_settings_layout = QGridLayout(line_group)
+        line_page_layout.addWidget(line_group)
+        line_page_layout.addWidget(self.apply_line_style_button)
+        line_page_layout.addStretch()
+        self.plot_option_pages.addWidget(line_page)
+        self.rebuild_line_setting_inputs()
+
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(self.connection_button)
+        top_bar.addWidget(self.channel_setting_button)
+        top_bar.addWidget(self.curve_setting_button)
+        top_bar.addStretch()
+
+        key_row = QHBoxLayout()
+        key_row.addWidget(QLabel("X 键"))
+        key_row.addWidget(self.x_key_input)
+        key_row.addWidget(QLabel("Y 键"))
+        key_row.addWidget(self.key_input)
+        key_row.addWidget(self.plot_key_button)
+        key_row.addWidget(self.clear_plot_button)
+        key_row.addWidget(self.save_data_button)
+        key_row.setStretch(1, 1)
+        key_row.setStretch(3, 1)
+
+        parsed_group = QGroupBox("JSON 解析后的键-值对信息")
+        parsed_layout = QVBoxLayout(parsed_group)
+        parsed_layout.addWidget(self.parsed_view)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(top_bar)
+        main_layout.addLayout(key_row)
+        main_layout.addWidget(self.plot, 7)
+        main_layout.addWidget(parsed_group, 2)
+
+        central = QWidget()
+        central.setLayout(main_layout)
+        self.setCentralWidget(central)
+        self._refresh_parsed_view()
+
+    def show_connection_dialog(self):
+        self._show_dialog(self.connection_dialog)
+
+    def show_channel_dialog(self):
+        self._show_dialog(self.channel_dialog)
+
+    def show_plot_option(self, index):
+        if index < 0 or self.curve_dialog is None or self.plot_option_pages is None:
+            return
+
+        option_name = self.curve_setting_button.itemText(index)
+        self.plot_option_pages.setCurrentIndex(index)
+        self.curve_dialog.setWindowTitle(option_name)
+        self._show_dialog(self.curve_dialog)
+        self.curve_setting_button.setCurrentIndex(-1)
+
+    @staticmethod
+    def _show_dialog(dialog):
+        if dialog is None:
+            return
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def _load_options(self):
         for baud in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600):
             self.baud_combo.addItem(str(baud), baud)
@@ -260,8 +494,10 @@ class SerialWindow(QMainWindow):
 
         self.channel_ids = channel_ids
         self.plot.set_channels(self.channel_ids)
+        self.rebuild_line_setting_inputs()
         self._reset_timestamp_counters()
         self.channel_status_label.setText(f"当前 Channel：{', '.join(self.channel_ids)}")
+        self._refresh_parsed_view()
         self.apply_plot_key()
 
     def _read_channel_ids_from_inputs(self):
@@ -286,6 +522,63 @@ class SerialWindow(QMainWindow):
                 widget.deleteLater()
             elif child_layout is not None:
                 self._clear_layout(child_layout)
+
+    def rebuild_line_setting_inputs(self):
+        if self.line_settings_layout is None:
+            return
+
+        self._clear_layout(self.line_settings_layout)
+        self.line_style_inputs = {}
+        headers = ("Channel", "Color", "Line Type", "Width")
+        for column, header in enumerate(headers):
+            self.line_settings_layout.addWidget(QLabel(header), 0, column)
+
+        for row, channel_id in enumerate(self.channel_ids, start=1):
+            style = self.plot.channel_style(channel_id, row - 1)
+            color_combo = QComboBox()
+            for color_name, color_value in self.LINE_COLORS:
+                color_combo.addItem(f"{color_name} ({color_value})", color_value)
+            self._set_combo_current_data(color_combo, style["color"])
+
+            line_style_combo = QComboBox()
+            for style_name, line_style in self.LINE_STYLES:
+                line_style_combo.addItem(style_name, line_style)
+            self._set_combo_current_data(line_style_combo, style["line_style"])
+
+            width_combo = QComboBox()
+            for width in self.LINE_WIDTHS:
+                width_combo.addItem(str(width), width)
+            self._set_combo_current_data(width_combo, style["width"])
+
+            self.line_settings_layout.addWidget(QLabel(f"ID={channel_id}"), row, 0)
+            self.line_settings_layout.addWidget(color_combo, row, 1)
+            self.line_settings_layout.addWidget(line_style_combo, row, 2)
+            self.line_settings_layout.addWidget(width_combo, row, 3)
+            self.line_style_inputs[channel_id] = {
+                "color": color_combo,
+                "line_style": line_style_combo,
+                "width": width_combo,
+            }
+
+        self.line_settings_layout.setColumnStretch(1, 1)
+        self.line_settings_layout.setColumnStretch(2, 1)
+
+    @staticmethod
+    def _set_combo_current_data(combo, target_data):
+        for index in range(combo.count()):
+            if combo.itemData(index) == target_data:
+                combo.setCurrentIndex(index)
+                return
+
+    def apply_line_settings(self):
+        for channel_id, inputs in self.line_style_inputs.items():
+            self.plot.set_channel_style(
+                channel_id,
+                color=inputs["color"].currentData(),
+                line_style=inputs["line_style"].currentData(),
+                width=inputs["width"].currentData(),
+            )
+        self.plot_status_label.setText("Line Setting 已应用，曲线和图例已同步更新")
 
     def update_axis_input_state(self, *_):
         mode = self.x_mode_combo.currentText()
@@ -492,12 +785,12 @@ class SerialWindow(QMainWindow):
                 if newline_index >= 0 and exc.pos <= newline_index:
                     bad_line = self.json_buffer[:newline_index].strip()
                     if bad_line:
-                        self.parsed_view.appendPlainText(f"[解析失败] {bad_line}")
+                        self._append_parsed_message(f"[解析失败] {bad_line}")
                     self.json_buffer = self.json_buffer[newline_index + 1 :]
                     continue
 
                 if len(self.json_buffer) > self.MAX_JSON_BUFFER_CHARS:
-                    self.parsed_view.appendPlainText("[解析失败] JSON 缓冲区过长，已丢弃当前不完整数据")
+                    self._append_parsed_message("[解析失败] JSON 缓冲区过长，已丢弃当前不完整数据")
                     self.json_buffer = ""
                 return
 
@@ -511,7 +804,7 @@ class SerialWindow(QMainWindow):
 
     def _handle_json_object(self, data):
         if not isinstance(data, dict):
-            self.parsed_view.appendPlainText(f"[忽略] 收到的 JSON 不是对象：{json.dumps(data, ensure_ascii=False)}")
+            self._append_parsed_message(f"[忽略] 收到的 JSON 不是对象：{json.dumps(data, ensure_ascii=False)}")
             return
 
         channel_id = str(data.get("ID", ""))
@@ -522,8 +815,8 @@ class SerialWindow(QMainWindow):
             "data": data,
         }
         self.records.append(record)
-        self.parsed_view.appendPlainText(self._format_key_values_by_channel(data))
-        self._append_current_plot_point(record)
+        self._update_parsed_channel_data(data)
+        self._queue_record_for_plot(record)
 
     def _assign_channel_timestamp(self, channel_id):
         if not self.channel_ids or channel_id not in self.channel_ids:
@@ -542,33 +835,98 @@ class SerialWindow(QMainWindow):
             parts.append(f"{key}={json.dumps(value, ensure_ascii=False)}")
         return " | ".join(parts)
 
-    def _append_current_plot_point(self, record):
+    def _update_parsed_channel_data(self, data):
+        channel_id = str(data.get("ID", "<无ID>"))
+        self.parsed_latest_by_channel[channel_id] = self._format_key_values_by_channel(data)
+        self._refresh_parsed_view()
+
+    def _append_parsed_message(self, message):
+        self.parsed_messages.append(message)
+        self._refresh_parsed_view()
+
+    def _refresh_parsed_view(self):
+        lines = []
+        shown_channel_ids = set()
+
+        for channel_id in self.channel_ids:
+            shown_channel_ids.add(channel_id)
+            lines.append(self.parsed_latest_by_channel.get(channel_id, f"ID={channel_id} | 等待数据"))
+
+        extra_channel_ids = sorted(
+            channel_id
+            for channel_id in self.parsed_latest_by_channel
+            if channel_id not in shown_channel_ids
+        )
+        for channel_id in extra_channel_ids:
+            lines.append(self.parsed_latest_by_channel[channel_id])
+
+        if self.parsed_messages:
+            if lines:
+                lines.append("")
+            lines.extend(self.parsed_messages)
+
+        self.parsed_view.setPlainText("\n".join(lines))
+        self.parsed_view.moveCursor(QTextCursor.MoveOperation.End)
+
+    def _queue_record_for_plot(self, record):
         channel_id = record["channel_id"]
         if channel_id not in self.channel_ids:
             self.plot_status_label.setText(f"ID={channel_id or '<无>'} 未配置为 Channel，未绘图")
             return
 
-        x_value = self._record_numeric_value(record, self.current_x_key)
-        y_value = self._record_numeric_value(record, self.current_y_key)
+        self.plot_record_queues.setdefault(channel_id, deque()).append(record)
 
-        if x_value is None or y_value is None:
-            missing = []
-            if x_value is None:
-                missing.append(f"X={self.current_x_key}")
-            if y_value is None:
-                missing.append(f"Y={self.current_y_key}")
+    def flush_plot_records(self):
+        if not self.channel_ids:
+            return
+
+        while all(self.plot_record_queues.get(channel_id) for channel_id in self.channel_ids):
+            batch = {
+                channel_id: self.plot_record_queues[channel_id].popleft()
+                for channel_id in self.channel_ids
+            }
+            self._append_synchronized_plot_batch(batch)
+
+    def _append_synchronized_plot_batch(self, batch):
+        sample_index = self.plot_sample_index
+        points, missing = self._batch_plot_values(batch, self.current_x_key, self.current_y_key, sample_index)
+        self.plot_sample_index += 1
+
+        if missing:
             self.plot_status_label.setText(f"当前曲线：{', '.join(missing)} 不是可绘制数字")
             return
 
-        self.plot.add_point(channel_id, x_value, y_value)
+        for channel_id, x_value, y_value in points:
+            self.plot.add_point(channel_id, x_value, y_value)
+
         self.plot_status_label.setText(
-            f"ID={channel_id}：X={self.current_x_key}({self._format_csv_number(x_value)})，"
-            f"Y={self.current_y_key}({self._format_csv_number(y_value)})"
+            f"同步绘图：Sample={sample_index}，Channel={len(points)}，"
+            f"X={self.current_x_key}，Y={self.current_y_key}"
         )
 
-    def _record_numeric_value(self, record, key):
+    def _batch_plot_values(self, batch, x_key, y_key, sample_index):
+        points = []
+        missing = []
+        for channel_id in self.channel_ids:
+            record = batch[channel_id]
+            x_value = self._record_numeric_value(record, x_key, sample_index)
+            y_value = self._record_numeric_value(record, y_key, sample_index)
+
+            if x_value is None:
+                missing.append(f"ID={channel_id} X={x_key}")
+            if y_value is None:
+                missing.append(f"ID={channel_id} Y={y_key}")
+            points.append((channel_id, x_value, y_value))
+
+        if missing:
+            return [], missing
+        return points, []
+
+    def _record_numeric_value(self, record, key, sample_index=None):
         normalized_key = key.strip()
         if normalized_key.lower() in ("timestamp", "time"):
+            if sample_index is not None:
+                return float(sample_index)
             return float(record["timestamp"])
 
         data = record["data"]
@@ -594,25 +952,40 @@ class SerialWindow(QMainWindow):
         self.current_x_key = x_key
         self.current_y_key = y_key
         self.x_key_input.setText(x_key)
-        self._normalize_record_timestamps()
         self.plot.set_channels(self.channel_ids)
+        self.rebuild_line_setting_inputs()
         self.plot.set_title(f"Y={y_key} / X={x_key}")
-        channel_points = {channel_id: [] for channel_id in self.channel_ids}
-        for record in self.records:
-            channel_id = record["channel_id"]
-            if channel_id not in channel_points:
-                continue
-            x_value = self._record_numeric_value(record, x_key)
-            y_value = self._record_numeric_value(record, y_key)
-            if x_value is not None and y_value is not None:
-                channel_points[channel_id].append((x_value, y_value))
-
+        channel_points = self._synchronized_channel_points_from_records(x_key, y_key)
         self.plot.set_channel_points(channel_points)
         self.channel_status_label.setText(f"当前 Channel：{', '.join(self.channel_ids)}")
         total_points = sum(len(points) for points in channel_points.values())
         self.plot_status_label.setText(
             f"当前曲线：X={x_key}，Y={y_key}，Channel={len(self.channel_ids)}，历史点数：{total_points}"
         )
+
+    def _synchronized_channel_points_from_records(self, x_key, y_key):
+        record_queues = {channel_id: deque() for channel_id in self.channel_ids}
+        for record in self.records:
+            channel_id = record["channel_id"]
+            if channel_id in record_queues:
+                record_queues[channel_id].append(record)
+
+        channel_points = {channel_id: [] for channel_id in self.channel_ids}
+        sample_index = 0
+        while all(record_queues[channel_id] for channel_id in self.channel_ids):
+            batch = {
+                channel_id: record_queues[channel_id].popleft()
+                for channel_id in self.channel_ids
+            }
+            points, missing = self._batch_plot_values(batch, x_key, y_key, sample_index)
+            if not missing:
+                for channel_id, x_value, y_value in points:
+                    channel_points[channel_id].append((x_value, y_value))
+            sample_index += 1
+
+        self.plot_record_queues = record_queues
+        self.plot_sample_index = sample_index
+        return channel_points
 
     def _normalize_record_timestamps(self):
         channel_sample_counts = {channel_id: 0 for channel_id in self.channel_ids}
@@ -728,7 +1101,9 @@ class SerialWindow(QMainWindow):
 
     def clear_data(self):
         self.raw_view.clear()
-        self.parsed_view.clear()
+        self.parsed_latest_by_channel.clear()
+        self.parsed_messages.clear()
+        self._refresh_parsed_view()
         self.json_buffer = ""
         self._reset_plot_history()
         self.plot_status_label.setText(f"当前曲线：X={self.current_x_key}，Y={self.current_y_key}")
@@ -736,6 +1111,8 @@ class SerialWindow(QMainWindow):
     def _reset_plot_history(self):
         self.records.clear()
         self._reset_timestamp_counters()
+        self.plot_record_queues = {channel_id: deque() for channel_id in self.channel_ids}
+        self.plot_sample_index = 0
         self.plot.clear()
 
     def _set_controls_enabled(self, enabled):

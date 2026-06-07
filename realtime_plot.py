@@ -1,7 +1,7 @@
 from decimal import Decimal, InvalidOperation
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
 
@@ -18,11 +18,18 @@ class RealtimePlot(QWidget):
         "#16a34a",
         "#ea580c",
     )
+    DEFAULT_LINE_STYLE = Qt.PenStyle.SolidLine
+    DEFAULT_LINE_WIDTH = 2
+    TICK_FONT_POINT_SIZE = 10
+    LEGEND_FONT_POINT_SIZE = 12
+    LEGEND_SAMPLE_LENGTH = 42
+    LEGEND_ITEM_GAP = 34
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.series = {}
         self.next_sequence = {}
+        self.channel_styles = {}
         self.title = "等待选择键"
         self.y_min_override = None
         self.y_max_override = None
@@ -39,16 +46,31 @@ class RealtimePlot(QWidget):
         self.update()
 
     def set_channels(self, channel_ids):
-        for channel_id in channel_ids:
+        for channel_index, channel_id in enumerate(channel_ids):
             self.series.setdefault(channel_id, [])
             self.next_sequence.setdefault(channel_id, 0)
+            self.channel_styles.setdefault(channel_id, self._default_channel_style(channel_index))
 
         allowed = set(channel_ids)
         for channel_id in list(self.series):
             if channel_id not in allowed:
                 del self.series[channel_id]
                 self.next_sequence.pop(channel_id, None)
+                self.channel_styles.pop(channel_id, None)
         self.update()
+
+    def set_channel_style(self, channel_id, color=None, line_style=None, width=None):
+        style = self.channel_styles.setdefault(channel_id, self._default_channel_style(len(self.channel_styles)))
+        if color is not None:
+            style["color"] = color
+        if line_style is not None:
+            style["line_style"] = line_style
+        if width is not None:
+            style["width"] = max(1, int(width))
+        self.update()
+
+    def channel_style(self, channel_id, channel_index=0):
+        return self.channel_styles.setdefault(channel_id, self._default_channel_style(channel_index)).copy()
 
     def add_point(self, channel_id, x_value, y_value):
         self.series.setdefault(channel_id, [])
@@ -97,6 +119,9 @@ class RealtimePlot(QWidget):
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        base_font = painter.font()
+        base_font.setPointSize(self.TICK_FONT_POINT_SIZE)
+        painter.setFont(base_font)
 
         rect = self.rect().adjusted(78, 28, -28, -54)
         painter.fillRect(self.rect(), QColor("#f7f8fa"))
@@ -107,8 +132,6 @@ class RealtimePlot(QWidget):
 
         painter.setPen(axis_pen)
         painter.drawRect(rect)
-        painter.setPen(text_pen)
-        painter.drawText(12, 20, self.title)
 
         data_by_channel = {
             channel_id: list(points)
@@ -143,7 +166,7 @@ class RealtimePlot(QWidget):
             if not channel_points:
                 continue
 
-            line_pen = QPen(QColor(self._channel_color(channel_index)), 2)
+            line_pen = self._channel_pen(channel_id, channel_index)
             painter.setPen(line_pen)
             mapped_points = [
                 (
@@ -158,8 +181,11 @@ class RealtimePlot(QWidget):
                 painter.drawEllipse(x - 3, y - 3, 6, 6)
                 continue
 
-            for start, end in zip(mapped_points, mapped_points[1:]):
-                painter.drawLine(start[0], start[1], end[0], end[1])
+            path = QPainterPath()
+            path.moveTo(mapped_points[0][0], mapped_points[0][1])
+            for x, y in mapped_points[1:]:
+                path.lineTo(x, y)
+            painter.drawPath(path)
         painter.restore()
 
         self._draw_legend(painter, rect, visible_by_channel)
@@ -268,21 +294,44 @@ class RealtimePlot(QWidget):
         painter.drawRect(rect)
 
     def _draw_legend(self, painter, rect, visible_by_channel):
+        painter.save()
+        legend_font = QFont(painter.font())
+        legend_font.setPointSize(self.LEGEND_FONT_POINT_SIZE)
+        legend_font.setBold(True)
+        painter.setFont(legend_font)
+        metrics = painter.fontMetrics()
+
         painter.setPen(QPen(QColor("#374151")))
-        x = rect.right() - 140
-        y = rect.top() + 8
+        x = rect.left() + 18
+        y = rect.top() + 18
         for channel_index, channel_id in enumerate(visible_by_channel):
-            if y > rect.bottom() - 16:
+            text = f"ID={channel_id}"
+            text_width = metrics.horizontalAdvance(text)
+            item_width = self.LEGEND_SAMPLE_LENGTH + 10 + text_width + self.LEGEND_ITEM_GAP
+            if x + item_width > rect.right():
                 break
-            color = QColor(self._channel_color(channel_index))
-            painter.setPen(QPen(color, 3))
-            painter.drawLine(x, y + 6, x + 18, y + 6)
+            painter.setPen(self._channel_pen(channel_id, channel_index))
+            painter.drawLine(x, y, x + self.LEGEND_SAMPLE_LENGTH, y)
             painter.setPen(QPen(QColor("#374151")))
-            painter.drawText(x + 24, y + 11, f"ID={channel_id}")
-            y += 18
+            painter.drawText(x + self.LEGEND_SAMPLE_LENGTH + 10, y + metrics.ascent() // 2, text)
+            x += item_width
+        painter.restore()
 
     def _channel_color(self, channel_index):
         return self.COLOR_PALETTE[channel_index % len(self.COLOR_PALETTE)]
+
+    def _default_channel_style(self, channel_index):
+        return {
+            "color": self._channel_color(channel_index),
+            "line_style": self.DEFAULT_LINE_STYLE,
+            "width": self.DEFAULT_LINE_WIDTH,
+        }
+
+    def _channel_pen(self, channel_id, channel_index):
+        style = self.channel_style(channel_id, channel_index)
+        pen = QPen(QColor(style["color"]), style["width"])
+        pen.setStyle(style["line_style"])
+        return pen
 
     @staticmethod
     def _format_x_number(value):
