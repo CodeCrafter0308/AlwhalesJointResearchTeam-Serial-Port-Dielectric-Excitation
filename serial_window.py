@@ -73,6 +73,7 @@ class SerialWindow(QMainWindow):
         self.channel_id_inputs = []
         self.channel_inputs_layout = None
         self.connection_dialog = None
+        self.mode_dialog = None
         self.channel_dialog = None
         self.curve_dialog = None
         self.plot_option_combo = None
@@ -106,11 +107,22 @@ class SerialWindow(QMainWindow):
         self.raw_view = QPlainTextEdit()
         self.parsed_view = QPlainTextEdit()
         self.connection_button = QPushButton("Connection")
+        self.mode_setting_button = QPushButton("Mode Setting")
         self.channel_setting_button = QPushButton("Channel Setting")
         self.curve_setting_button = QComboBox()
         self.curve_setting_button.setPlaceholderText("Plot Options")
         self.curve_setting_button.addItems(("Coordinate Setting", "Line Setting"))
         self.curve_setting_button.setCurrentIndex(-1)
+        self.scan_mode_combo = QComboBox()
+        self.scan_mode_combo.addItem("扫频", 0)
+        self.scan_mode_combo.addItem("定频", 1)
+        self.fixed_frequency_input = QLineEdit("10000")
+        self.sweep_lower_frequency_input = QLineEdit("5000")
+        self.sweep_upper_frequency_input = QLineEdit("100000")
+        self.sweep_step_frequency_input = QLineEdit("1000")
+        self.apply_mode_button = QPushButton("Apply Mode")
+        self.apply_mode_button.setEnabled(False)
+        self.mode_status_label = QLabel("请先打开串口")
         self.x_key_input = QLineEdit(self.current_x_key)
         self.key_input = QLineEdit(self.current_y_key)
         self.plot_key_button = QPushButton("绘制曲线")
@@ -143,6 +155,7 @@ class SerialWindow(QMainWindow):
 
         self._build_modular_ui()
         self._load_options()
+        self.update_mode_input_state()
         self.update_axis_input_state()
         self.refresh_ports()
 
@@ -287,8 +300,15 @@ class SerialWindow(QMainWindow):
         self.apply_line_style_button.clicked.connect(self.apply_line_settings)
         self.x_mode_combo.currentTextChanged.connect(self.update_axis_input_state)
         self.connection_button.clicked.connect(self.show_connection_dialog)
+        self.mode_setting_button.clicked.connect(self.show_mode_dialog)
         self.channel_setting_button.clicked.connect(self.show_channel_dialog)
         self.curve_setting_button.activated.connect(self.show_plot_option)
+        self.scan_mode_combo.currentIndexChanged.connect(self.update_mode_input_state)
+        self.apply_mode_button.clicked.connect(self.send_mode_setting)
+        self.fixed_frequency_input.returnPressed.connect(self.send_mode_setting)
+        self.sweep_lower_frequency_input.returnPressed.connect(self.send_mode_setting)
+        self.sweep_upper_frequency_input.returnPressed.connect(self.send_mode_setting)
+        self.sweep_step_frequency_input.returnPressed.connect(self.send_mode_setting)
 
         self.connection_dialog = QDialog(self)
         self.connection_dialog.setWindowTitle("Connection")
@@ -323,6 +343,29 @@ class SerialWindow(QMainWindow):
         connection_layout.addWidget(settings_group)
         connection_layout.addLayout(serial_buttons)
         connection_layout.addWidget(raw_group, 1)
+
+        self.mode_dialog = QDialog(self)
+        self.mode_dialog.setWindowTitle("Mode Setting")
+        self.mode_dialog.resize(580, 180)
+        mode_dialog_layout = QVBoxLayout(self.mode_dialog)
+        mode_group = QGroupBox("Mode Setting")
+        mode_layout = QGridLayout(mode_group)
+        mode_layout.addWidget(QLabel("模式"), 0, 0)
+        mode_layout.addWidget(self.scan_mode_combo, 0, 1)
+        mode_layout.addWidget(QLabel("定频频率 (Hz)"), 0, 2)
+        mode_layout.addWidget(self.fixed_frequency_input, 0, 3)
+        mode_layout.addWidget(QLabel("扫频下限 (Hz)"), 1, 0)
+        mode_layout.addWidget(self.sweep_lower_frequency_input, 1, 1)
+        mode_layout.addWidget(QLabel("扫频上限 (Hz)"), 1, 2)
+        mode_layout.addWidget(self.sweep_upper_frequency_input, 1, 3)
+        mode_layout.addWidget(QLabel("扫频间隔 (Hz)"), 2, 0)
+        mode_layout.addWidget(self.sweep_step_frequency_input, 2, 1)
+        mode_layout.addWidget(self.apply_mode_button, 2, 2)
+        mode_layout.addWidget(self.mode_status_label, 2, 3)
+        mode_layout.setColumnStretch(1, 1)
+        mode_layout.setColumnStretch(3, 1)
+        mode_dialog_layout.addWidget(mode_group)
+        mode_dialog_layout.addStretch()
 
         self.channel_dialog = QDialog(self)
         self.channel_dialog.setWindowTitle("Channel Setting")
@@ -388,6 +431,7 @@ class SerialWindow(QMainWindow):
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(self.connection_button)
+        top_bar.addWidget(self.mode_setting_button)
         top_bar.addWidget(self.channel_setting_button)
         top_bar.addWidget(self.curve_setting_button)
         top_bar.addStretch()
@@ -418,8 +462,83 @@ class SerialWindow(QMainWindow):
         self.setCentralWidget(central)
         self._refresh_parsed_view()
 
+    def update_mode_input_state(self):
+        is_fixed = self.scan_mode_combo.currentData() == 1
+        self.fixed_frequency_input.setEnabled(is_fixed)
+        self.sweep_lower_frequency_input.setEnabled(not is_fixed)
+        self.sweep_upper_frequency_input.setEnabled(not is_fixed)
+        self.sweep_step_frequency_input.setEnabled(not is_fixed)
+
+    def send_mode_setting(self):
+        if not self.serial.isOpen():
+            QMessageBox.warning(self, "串口未打开", "请先打开串口，再发送 Mode Setting。")
+            return
+
+        payload = self._mode_setting_payload()
+        if payload is None:
+            return
+
+        command = f"{payload}\n".encode("utf-8")
+        bytes_written = self.serial.write(command)
+        if bytes_written == -1:
+            QMessageBox.critical(self, "发送失败", self.serial.errorString())
+            return
+
+        self.serial.flush()
+        self.mode_status_label.setText(f"已发送：{payload}")
+        self.raw_view.appendPlainText(f"\n[TX] {payload}")
+
+        if bytes_written != len(command):
+            QMessageBox.warning(self, "发送未完成", f"仅写入 {bytes_written}/{len(command)} 字节。")
+
+    def _mode_setting_payload(self):
+        mode = self.scan_mode_combo.currentData()
+        if mode == 1:
+            frequency = self._parse_required_frequency_hz(self.fixed_frequency_input, "定频频率")
+            if frequency is None:
+                return None
+            return f"1,{self._format_protocol_frequency(frequency)}"
+
+        lower = self._parse_required_frequency_hz(self.sweep_lower_frequency_input, "扫频下限")
+        upper = self._parse_required_frequency_hz(self.sweep_upper_frequency_input, "扫频上限")
+        step = self._parse_required_frequency_hz(self.sweep_step_frequency_input, "扫频间隔")
+        if lower is None or upper is None or step is None:
+            return None
+        if lower >= upper:
+            QMessageBox.warning(self, "Mode Setting 错误", "扫频下限必须小于扫频上限。")
+            return None
+
+        return (
+            f"0,{self._format_protocol_frequency(lower)},"
+            f"{self._format_protocol_frequency(upper)},"
+            f"{self._format_protocol_frequency(step)}"
+        )
+
+    @staticmethod
+    def _parse_required_frequency_hz(input_widget, name):
+        text = input_widget.text().strip()
+        if not text:
+            QMessageBox.warning(input_widget, "输入错误", f"{name} 不能为空。")
+            return None
+        try:
+            value = Decimal(text)
+        except InvalidOperation:
+            QMessageBox.warning(input_widget, "输入错误", f"{name} 必须是数字。")
+            return None
+        if value <= 0:
+            QMessageBox.warning(input_widget, "输入错误", f"{name} 必须大于 0。")
+            return None
+        return value
+
+    @staticmethod
+    def _format_protocol_frequency(frequency_hz):
+        return SerialWindow._format_csv_number(frequency_hz / Decimal("1000"))
+
     def show_connection_dialog(self):
         self._show_dialog(self.connection_dialog)
+
+    def show_mode_dialog(self):
+        self._show_dialog(self.mode_dialog)
 
     def show_channel_dialog(self):
         self._show_dialog(self.channel_dialog)
@@ -738,13 +857,14 @@ class SerialWindow(QMainWindow):
         self.serial.setStopBits(self.stop_bits_combo.currentData())
         self.serial.setFlowControl(QSerialPort.FlowControl.NoFlowControl)
 
-        if not self.serial.open(QIODeviceBase.OpenModeFlag.ReadOnly):
+        if not self.serial.open(QIODeviceBase.OpenModeFlag.ReadWrite):
             QMessageBox.critical(self, "打开串口失败", self.serial.errorString())
             return
 
         self._set_controls_enabled(False)
         self.open_button.setEnabled(False)
         self.close_button.setEnabled(True)
+        self.apply_mode_button.setEnabled(True)
         self.status_label.setText(f"已打开：{port_name}")
         self.raw_view.appendPlainText(f"[INFO] 已打开串口 {port_name}")
 
@@ -757,6 +877,8 @@ class SerialWindow(QMainWindow):
         self._set_controls_enabled(True)
         self.open_button.setEnabled(self.port_combo.currentData() is not None)
         self.close_button.setEnabled(False)
+        self.apply_mode_button.setEnabled(False)
+        self.mode_status_label.setText("请先打开串口")
         self.status_label.setText("串口未打开")
 
     def read_serial_data(self):
@@ -875,6 +997,7 @@ class SerialWindow(QMainWindow):
             return
 
         self.plot_record_queues.setdefault(channel_id, deque()).append(record)
+        self.flush_plot_records()
 
     def flush_plot_records(self):
         if not self.channel_ids:
