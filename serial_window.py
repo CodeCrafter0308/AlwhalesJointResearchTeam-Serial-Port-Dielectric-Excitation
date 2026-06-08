@@ -5,12 +5,13 @@ from decimal import Decimal, InvalidOperation
 from numbers import Real
 
 from PyQt6.QtCore import QIODeviceBase, Qt, QTimer
-from PyQt6.QtGui import QTextCursor
+from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtSerialPort import QSerialPort, QSerialPortInfo
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -32,6 +33,8 @@ class SerialWindow(QMainWindow):
     MAX_JSON_BUFFER_CHARS = 20000
     PLOT_REFRESH_INTERVAL_MS = 100
     PARSED_MESSAGE_LIMIT = 12
+    PLOT_SYNC_KEY = "Freq"
+    PLOT_SYNC_LOOKAHEAD = 32
     LINE_COLORS = (
         ("Teal", "#0f766e"),
         ("Blue", "#2563eb"),
@@ -65,10 +68,12 @@ class SerialWindow(QMainWindow):
         self.channel_sample_counts = {}
         self.plot_record_queues = {}
         self.plot_sample_index = 0
+        self.record_sequence = 0
+        self.plot_sync_drop_count = 0
         self.parsed_latest_by_channel = {}
         self.parsed_messages = deque(maxlen=self.PARSED_MESSAGE_LIMIT)
-        self.current_x_key = "timestamp"
-        self.current_y_key = "Freq"
+        self.current_x_key = "Freq"
+        self.current_y_key = "Zi"
         self.channel_ids = ["0012"]
         self.channel_id_inputs = []
         self.channel_inputs_layout = None
@@ -81,18 +86,9 @@ class SerialWindow(QMainWindow):
         self.line_settings_layout = None
         self.line_style_inputs = {}
 
-        self.setWindowTitle("串口数据接收与 JSON 解析绘图")
-        self.resize(1180, 760)
-        self.setStyleSheet(
-            """
-            QWidget {
-                font-size: 11pt;
-            }
-            QLineEdit, QComboBox, QPushButton {
-                min-height: 26px;
-            }
-            """
-        )
+        self.setWindowTitle("Sensor Data Acquisition & Analysis Console")
+        self.resize(1280, 820)
+        self._apply_industrial_theme()
 
         self.port_combo = QComboBox()
         self.baud_combo = QComboBox()
@@ -106,6 +102,10 @@ class SerialWindow(QMainWindow):
         self.status_label = QLabel("串口未打开")
         self.raw_view = QPlainTextEdit()
         self.parsed_view = QPlainTextEdit()
+        data_font = QFont("Consolas", 10)
+        data_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.raw_view.setFont(data_font)
+        self.parsed_view.setFont(data_font)
         self.connection_button = QPushButton("Connection")
         self.mode_setting_button = QPushButton("Mode Setting")
         self.channel_setting_button = QPushButton("Channel Setting")
@@ -128,7 +128,10 @@ class SerialWindow(QMainWindow):
         self.plot_key_button = QPushButton("绘制曲线")
         self.clear_plot_button = QPushButton("清除曲线")
         self.save_data_button = QPushButton("保存数据")
-        self.plot_status_label = QLabel("当前曲线：X=timestamp，Y=Freq")
+        self.plot_status_label = QLabel("当前曲线：X=Freq，Y=Zi")
+        self.plot_status_label.setObjectName("plotStatusText")
+        self.system_state_label = QLabel("OFFLINE")
+        self.system_state_label.setObjectName("statePillOffline")
         self.channel_count_input = QLineEdit("1")
         self.apply_channel_count_button = QPushButton("应用数量")
         self.apply_channels_button = QPushButton("应用 Channel")
@@ -145,9 +148,10 @@ class SerialWindow(QMainWindow):
         self.apply_axis_button = QPushButton("应用坐标")
         self.apply_line_style_button = QPushButton("Apply Line Setting")
         self.axis_status_label = QLabel("纵轴自动；横轴 Scaling，右侧留白 5")
+        self._configure_widget_roles()
         self.plot = RealtimePlot()
         self.plot.set_channels(self.channel_ids)
-        self.plot.set_title("Y=Freq / X=timestamp")
+        self.plot.set_title("Y=Zi / X=Freq")
         self.plot_timer = QTimer(self)
         self.plot_timer.setInterval(self.PLOT_REFRESH_INTERVAL_MS)
         self.plot_timer.timeout.connect(self.flush_plot_records)
@@ -158,6 +162,170 @@ class SerialWindow(QMainWindow):
         self.update_mode_input_state()
         self.update_axis_input_state()
         self.refresh_ports()
+
+    def _apply_industrial_theme(self):
+        self.setStyleSheet(
+            """
+            QMainWindow, QDialog {
+                background: #e7ecf2;
+                color: #162235;
+            }
+            QWidget {
+                font-family: "Segoe UI", "Microsoft YaHei UI";
+                font-size: 10.5pt;
+            }
+            QFrame#appHeader {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #162235, stop:1 #24364f);
+                border: 1px solid #0f172a;
+                border-radius: 3px;
+            }
+            QLabel#appTitle {
+                color: #f8fafc;
+                font-size: 18pt;
+                font-weight: 700;
+                letter-spacing: 0.5px;
+            }
+            QLabel#appSubtitle {
+                color: #b9c5d6;
+                font-size: 9.5pt;
+            }
+            QLabel#statePillOffline, QLabel#statePillOnline {
+                border-radius: 12px;
+                padding: 4px 12px;
+                font-weight: 700;
+                letter-spacing: 0.8px;
+            }
+            QLabel#statePillOffline {
+                background: #334155;
+                color: #cbd5e1;
+                border: 1px solid #64748b;
+            }
+            QLabel#statePillOnline {
+                background: #064e3b;
+                color: #d1fae5;
+                border: 1px solid #10b981;
+            }
+            QFrame#navBar, QFrame#controlPanel {
+                background: #f8fafc;
+                border: 1px solid #c8d2df;
+                border-radius: 3px;
+            }
+            QGroupBox {
+                background: #f8fafc;
+                border: 1px solid #b8c3d1;
+                border-radius: 3px;
+                margin-top: 18px;
+                font-weight: 700;
+                color: #203047;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 6px;
+                background: #e7ecf2;
+                color: #203047;
+            }
+            QGroupBox#monitorGroup::title {
+                font-size: 12.5pt;
+            }
+            QLabel#plotStatusText {
+                font-size: 12pt;
+                font-weight: 700;
+                color: #162235;
+            }
+            QLineEdit, QComboBox, QPlainTextEdit {
+                background: #ffffff;
+                color: #111827;
+                border: 1px solid #aeb9c7;
+                border-radius: 2px;
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+            }
+            QLineEdit, QComboBox {
+                min-height: 28px;
+                padding: 2px 8px;
+            }
+            QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
+                border: 1px solid #2563eb;
+            }
+            QPlainTextEdit {
+                padding: 8px;
+                background: #fbfdff;
+            }
+            QPushButton {
+                min-height: 30px;
+                padding: 4px 14px;
+                border-radius: 2px;
+                border: 1px solid #9aa8ba;
+                background: #eef3f8;
+                color: #162235;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #e1e9f2;
+                border-color: #718096;
+            }
+            QPushButton:pressed {
+                background: #d4deea;
+            }
+            QPushButton:disabled {
+                background: #e5e7eb;
+                color: #94a3b8;
+                border-color: #cbd5e1;
+            }
+            QPushButton#primaryButton {
+                background: #1d4ed8;
+                color: #ffffff;
+                border-color: #1e40af;
+            }
+            QPushButton#primaryButton:hover {
+                background: #2563eb;
+            }
+            QPushButton#dangerButton {
+                background: #b91c1c;
+                color: #ffffff;
+                border-color: #991b1b;
+            }
+            QPushButton#dangerButton:hover {
+                background: #dc2626;
+            }
+            QPushButton#navButton {
+                background: #f8fafc;
+                border-color: #b8c3d1;
+                font-size: 12pt;
+                min-height: 38px;
+                text-align: left;
+                min-width: 136px;
+            }
+            QStatusBar {
+                background: #162235;
+                color: #dbe4ef;
+                border-top: 1px solid #0f172a;
+            }
+            """
+        )
+
+    def _configure_widget_roles(self):
+        for button in (self.connection_button, self.mode_setting_button, self.channel_setting_button):
+            button.setObjectName("navButton")
+        for button in (
+            self.open_button,
+            self.apply_mode_button,
+            self.plot_key_button,
+            self.apply_axis_button,
+            self.apply_channels_button,
+            self.apply_line_style_button,
+        ):
+            button.setObjectName("primaryButton")
+        self.close_button.setObjectName("dangerButton")
+
+    def _set_system_state(self, online, detail):
+        self.system_state_label.setText("ONLINE" if online else "OFFLINE")
+        self.system_state_label.setObjectName("statePillOnline" if online else "statePillOffline")
+        self.system_state_label.style().unpolish(self.system_state_label)
+        self.system_state_label.style().polish(self.system_state_label)
+        self.statusBar().showMessage(detail)
 
     def _build_legacy_ui(self):
         self.raw_view.setReadOnly(True)
@@ -312,7 +480,7 @@ class SerialWindow(QMainWindow):
 
         self.connection_dialog = QDialog(self)
         self.connection_dialog.setWindowTitle("Connection")
-        self.connection_dialog.resize(520, 680)
+        self.connection_dialog.resize(700, 760)
         connection_layout = QVBoxLayout(self.connection_dialog)
 
         settings_group = QGroupBox("串口设置")
@@ -340,9 +508,16 @@ class SerialWindow(QMainWindow):
         raw_layout = QVBoxLayout(raw_group)
         raw_layout.addWidget(self.raw_view)
 
+        parsed_group = QGroupBox("Decoded JSON Monitor")
+        parsed_group.setObjectName("monitorGroup")
+        parsed_layout = QVBoxLayout(parsed_group)
+        parsed_layout.setContentsMargins(10, 12, 10, 10)
+        parsed_layout.addWidget(self.parsed_view)
+
         connection_layout.addWidget(settings_group)
         connection_layout.addLayout(serial_buttons)
         connection_layout.addWidget(raw_group, 1)
+        connection_layout.addWidget(parsed_group, 1)
 
         self.mode_dialog = QDialog(self)
         self.mode_dialog.setWindowTitle("Mode Setting")
@@ -429,14 +604,38 @@ class SerialWindow(QMainWindow):
         self.plot_option_pages.addWidget(line_page)
         self.rebuild_line_setting_inputs()
 
-        top_bar = QHBoxLayout()
+        header_frame = QFrame()
+        header_frame.setObjectName("appHeader")
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(18, 12, 18, 12)
+        header_text_layout = QVBoxLayout()
+        header_title = QLabel("Sensor Data Acquisition & Analysis Console")
+        header_title.setObjectName("appTitle")
+        header_subtitle = QLabel("Serial acquisition | Mode control | Real-time synchronized plotting")
+        header_subtitle.setObjectName("appSubtitle")
+        header_text_layout.addWidget(header_title)
+        header_text_layout.addWidget(header_subtitle)
+        header_layout.addLayout(header_text_layout)
+        header_layout.addStretch()
+        header_layout.addWidget(self.system_state_label)
+
+        nav_frame = QFrame()
+        nav_frame.setObjectName("navBar")
+        top_bar = QHBoxLayout(nav_frame)
+        top_bar.setContentsMargins(10, 8, 10, 8)
+        top_bar.setSpacing(8)
         top_bar.addWidget(self.connection_button)
         top_bar.addWidget(self.mode_setting_button)
         top_bar.addWidget(self.channel_setting_button)
         top_bar.addWidget(self.curve_setting_button)
         top_bar.addStretch()
+        top_bar.addWidget(self.plot_status_label)
 
-        key_row = QHBoxLayout()
+        key_panel = QFrame()
+        key_panel.setObjectName("controlPanel")
+        key_row = QHBoxLayout(key_panel)
+        key_row.setContentsMargins(10, 8, 10, 8)
+        key_row.setSpacing(8)
         key_row.addWidget(QLabel("X 键"))
         key_row.addWidget(self.x_key_input)
         key_row.addWidget(QLabel("Y 键"))
@@ -447,19 +646,24 @@ class SerialWindow(QMainWindow):
         key_row.setStretch(1, 1)
         key_row.setStretch(3, 1)
 
-        parsed_group = QGroupBox("JSON 解析后的键-值对信息")
-        parsed_layout = QVBoxLayout(parsed_group)
-        parsed_layout.addWidget(self.parsed_view)
+        plot_group = QGroupBox("Realtime Trend")
+        plot_layout = QVBoxLayout(plot_group)
+        plot_layout.setContentsMargins(10, 12, 10, 10)
+        plot_layout.addWidget(self.plot)
 
         main_layout = QVBoxLayout()
-        main_layout.addLayout(top_bar)
-        main_layout.addLayout(key_row)
-        main_layout.addWidget(self.plot, 7)
-        main_layout.addWidget(parsed_group, 2)
+        main_layout.setContentsMargins(12, 12, 12, 10)
+        main_layout.setSpacing(10)
+        main_layout.addWidget(header_frame)
+        main_layout.addWidget(nav_frame)
+        main_layout.addWidget(key_panel)
+        main_layout.addWidget(plot_group, 1)
 
         central = QWidget()
+        central.setObjectName("mainSurface")
         central.setLayout(main_layout)
         self.setCentralWidget(central)
+        self.statusBar().showMessage("Ready")
         self._refresh_parsed_view()
 
     def update_mode_input_state(self):
@@ -497,7 +701,7 @@ class SerialWindow(QMainWindow):
             frequency = self._parse_required_frequency_hz(self.fixed_frequency_input, "定频频率")
             if frequency is None:
                 return None
-            return f"1,{self._format_protocol_frequency(frequency)}"
+            return f"set -o 1 -q {self._format_protocol_frequency(frequency)}"
 
         lower = self._parse_required_frequency_hz(self.sweep_lower_frequency_input, "扫频下限")
         upper = self._parse_required_frequency_hz(self.sweep_upper_frequency_input, "扫频上限")
@@ -509,9 +713,9 @@ class SerialWindow(QMainWindow):
             return None
 
         return (
-            f"0,{self._format_protocol_frequency(lower)},"
-            f"{self._format_protocol_frequency(upper)},"
-            f"{self._format_protocol_frequency(step)}"
+            f"set -o 0 -s {self._format_protocol_frequency(lower)} "
+            f"-e {self._format_protocol_frequency(upper)} "
+            f"-i {self._format_protocol_frequency(step)}"
         )
 
     @staticmethod
@@ -836,6 +1040,7 @@ class SerialWindow(QMainWindow):
             self.port_combo.addItem("未发现串口", None)
             self.open_button.setEnabled(False)
             self.status_label.setText("未发现可用串口")
+            self._set_system_state(False, "No serial port detected")
             return
 
         self.open_button.setEnabled(not self.serial.isOpen())
@@ -843,6 +1048,8 @@ class SerialWindow(QMainWindow):
         if index >= 0:
             self.port_combo.setCurrentIndex(index)
         self.status_label.setText("串口未打开")
+        if not self.serial.isOpen():
+            self._set_system_state(False, "Serial port ready to open")
 
     def open_serial(self):
         port_name = self.port_combo.currentData()
@@ -866,6 +1073,7 @@ class SerialWindow(QMainWindow):
         self.close_button.setEnabled(True)
         self.apply_mode_button.setEnabled(True)
         self.status_label.setText(f"已打开：{port_name}")
+        self._set_system_state(True, f"Serial port opened: {port_name}")
         self.raw_view.appendPlainText(f"[INFO] 已打开串口 {port_name}")
 
     def close_serial(self):
@@ -880,6 +1088,7 @@ class SerialWindow(QMainWindow):
         self.apply_mode_button.setEnabled(False)
         self.mode_status_label.setText("请先打开串口")
         self.status_label.setText("串口未打开")
+        self._set_system_state(False, "Serial port closed")
 
     def read_serial_data(self):
         raw = bytes(self.serial.readAll())
@@ -932,10 +1141,12 @@ class SerialWindow(QMainWindow):
         channel_id = str(data.get("ID", ""))
         timestamp = self._assign_channel_timestamp(channel_id)
         record = {
+            "sequence": self.record_sequence,
             "timestamp": timestamp,
             "channel_id": channel_id,
             "data": data,
         }
+        self.record_sequence += 1
         self.records.append(record)
         self._update_parsed_channel_data(data)
         self._queue_record_for_plot(record)
@@ -1004,11 +1215,95 @@ class SerialWindow(QMainWindow):
             return
 
         while all(self.plot_record_queues.get(channel_id) for channel_id in self.channel_ids):
-            batch = {
-                channel_id: self.plot_record_queues[channel_id].popleft()
+            batch = self._next_synchronized_plot_batch(self.plot_record_queues)
+            if batch is None:
+                return
+            self._append_synchronized_plot_batch(batch)
+
+    def _next_synchronized_plot_batch(self, record_queues):
+        if len(self.channel_ids) == 1:
+            channel_id = self.channel_ids[0]
+            return {channel_id: record_queues[channel_id].popleft()}
+
+        head_keys = {
+            channel_id: self._record_sync_key(record_queues[channel_id][0])
+            for channel_id in self.channel_ids
+        }
+        if any(sync_key is None for sync_key in head_keys.values()):
+            return {
+                channel_id: record_queues[channel_id].popleft()
                 for channel_id in self.channel_ids
             }
-            self._append_synchronized_plot_batch(batch)
+
+        if len(set(head_keys.values())) == 1:
+            return {
+                channel_id: record_queues[channel_id].popleft()
+                for channel_id in self.channel_ids
+            }
+
+        sync_key = self._best_common_sync_key(record_queues)
+        if sync_key is None:
+            if all(len(record_queues[channel_id]) >= self.PLOT_SYNC_LOOKAHEAD for channel_id in self.channel_ids):
+                self._drop_oldest_queued_record(record_queues)
+            return None
+
+        self._discard_records_before_sync_key(record_queues, sync_key)
+        return {
+            channel_id: record_queues[channel_id].popleft()
+            for channel_id in self.channel_ids
+        }
+
+    def _best_common_sync_key(self, record_queues):
+        positions_by_channel = {}
+        for channel_id in self.channel_ids:
+            positions = {}
+            for position, record in enumerate(record_queues[channel_id]):
+                if position >= self.PLOT_SYNC_LOOKAHEAD:
+                    break
+                sync_key = self._record_sync_key(record)
+                if sync_key is not None and sync_key not in positions:
+                    positions[sync_key] = position
+            positions_by_channel[channel_id] = positions
+
+        common_keys = set.intersection(
+            *(set(positions) for positions in positions_by_channel.values())
+        )
+        if not common_keys:
+            return None
+
+        return min(
+            common_keys,
+            key=lambda sync_key: (
+                max(positions_by_channel[channel_id][sync_key] for channel_id in self.channel_ids),
+                sum(positions_by_channel[channel_id][sync_key] for channel_id in self.channel_ids),
+            ),
+        )
+
+    def _discard_records_before_sync_key(self, record_queues, sync_key):
+        dropped = 0
+        for channel_id in self.channel_ids:
+            while record_queues[channel_id] and self._record_sync_key(record_queues[channel_id][0]) != sync_key:
+                record_queues[channel_id].popleft()
+                dropped += 1
+        if dropped:
+            self.plot_sync_drop_count += dropped
+            self.plot_status_label.setText(f"已按 {self.PLOT_SYNC_KEY} 重新同步，丢弃错位记录 {self.plot_sync_drop_count} 条")
+
+    def _drop_oldest_queued_record(self, record_queues):
+        channel_id = min(
+            self.channel_ids,
+            key=lambda candidate: record_queues[candidate][0].get("sequence", 0),
+        )
+        record_queues[channel_id].popleft()
+        self.plot_sync_drop_count += 1
+        self.plot_status_label.setText(f"等待 {self.PLOT_SYNC_KEY} 对齐，已丢弃错位记录 {self.plot_sync_drop_count} 条")
+
+    def _record_sync_key(self, record):
+        data = record["data"]
+        sync_value = data.get(self.PLOT_SYNC_KEY)
+        if not self._is_numeric_value(sync_value):
+            return None
+        return self._format_csv_number(sync_value)
 
     def _append_synchronized_plot_batch(self, batch):
         sample_index = self.plot_sample_index
@@ -1096,10 +1391,9 @@ class SerialWindow(QMainWindow):
         channel_points = {channel_id: [] for channel_id in self.channel_ids}
         sample_index = 0
         while all(record_queues[channel_id] for channel_id in self.channel_ids):
-            batch = {
-                channel_id: record_queues[channel_id].popleft()
-                for channel_id in self.channel_ids
-            }
+            batch = self._next_synchronized_plot_batch(record_queues)
+            if batch is None:
+                break
             points, missing = self._batch_plot_values(batch, x_key, y_key, sample_index)
             if not missing:
                 for channel_id, x_value, y_value in points:
@@ -1233,6 +1527,8 @@ class SerialWindow(QMainWindow):
 
     def _reset_plot_history(self):
         self.records.clear()
+        self.record_sequence = 0
+        self.plot_sync_drop_count = 0
         self._reset_timestamp_counters()
         self.plot_record_queues = {channel_id: deque() for channel_id in self.channel_ids}
         self.plot_sample_index = 0

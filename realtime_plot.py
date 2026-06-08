@@ -123,15 +123,23 @@ class RealtimePlot(QWidget):
         base_font.setPointSize(self.TICK_FONT_POINT_SIZE)
         painter.setFont(base_font)
 
-        rect = self.rect().adjusted(78, 28, -28, -54)
-        painter.fillRect(self.rect(), QColor("#f7f8fa"))
+        rect = self.rect().adjusted(78, 42, -28, -54)
+        painter.fillRect(self.rect(), QColor("#eef2f7"))
+        painter.fillRect(rect.adjusted(-1, -1, 1, 1), QColor("#ffffff"))
 
-        axis_pen = QPen(QColor("#8b95a1"), 1)
-        grid_pen = QPen(QColor("#d9dee7"), 1, Qt.PenStyle.DotLine)
-        text_pen = QPen(QColor("#374151"))
+        axis_pen = QPen(QColor("#65758b"), 1)
+        grid_pen = QPen(QColor("#d5dde8"), 1, Qt.PenStyle.DotLine)
+        text_pen = QPen(QColor("#24364f"))
 
         painter.setPen(axis_pen)
         painter.drawRect(rect)
+        painter.setPen(QPen(QColor("#162235")))
+        title_font = QFont(base_font)
+        title_font.setPointSize(11)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.drawText(rect.left(), 24, self.title)
+        painter.setFont(base_font)
 
         data_by_channel = {
             channel_id: list(points)
@@ -168,24 +176,7 @@ class RealtimePlot(QWidget):
 
             line_pen = self._channel_pen(channel_id, channel_index)
             painter.setPen(line_pen)
-            mapped_points = [
-                (
-                    self._map_x(x_value, x_min, x_max, rect),
-                    self._map_y(y_value, y_min, y_max, rect),
-                )
-                for _, x_value, y_value in channel_points
-            ]
-
-            if len(mapped_points) == 1:
-                x, y = mapped_points[0]
-                painter.drawEllipse(x - 3, y - 3, 6, 6)
-                continue
-
-            path = QPainterPath()
-            path.moveTo(mapped_points[0][0], mapped_points[0][1])
-            for x, y in mapped_points[1:]:
-                path.lineTo(x, y)
-            painter.drawPath(path)
+            self._draw_channel_segments(painter, channel_points, x_min, x_max, y_min, y_max, rect)
         painter.restore()
 
         self._draw_legend(painter, rect, visible_by_channel)
@@ -316,6 +307,43 @@ class RealtimePlot(QWidget):
             painter.drawText(x + self.LEGEND_SAMPLE_LENGTH + 10, y + metrics.ascent() // 2, text)
             x += item_width
         painter.restore()
+
+    def _draw_channel_segments(self, painter, channel_points, x_min, x_max, y_min, y_max, rect):
+        segment = []
+        previous_x_value = None
+
+        for _, x_value, y_value in channel_points:
+            if previous_x_value is not None and x_value < previous_x_value:
+                self._draw_segment(painter, segment, x_min, x_max, y_min, y_max, rect)
+                segment = []
+
+            segment.append((x_value, y_value))
+            previous_x_value = x_value
+
+        self._draw_segment(painter, segment, x_min, x_max, y_min, y_max, rect)
+
+    def _draw_segment(self, painter, segment, x_min, x_max, y_min, y_max, rect):
+        if not segment:
+            return
+
+        mapped_points = [
+            (
+                self._map_x(x_value, x_min, x_max, rect),
+                self._map_y(y_value, y_min, y_max, rect),
+            )
+            for x_value, y_value in segment
+        ]
+
+        if len(mapped_points) == 1:
+            x, y = mapped_points[0]
+            painter.drawEllipse(x - 3, y - 3, 6, 6)
+            return
+
+        path = QPainterPath()
+        path.moveTo(mapped_points[0][0], mapped_points[0][1])
+        for x, y in mapped_points[1:]:
+            path.lineTo(x, y)
+        painter.drawPath(path)
 
     def _channel_color(self, channel_index):
         return self.COLOR_PALETTE[channel_index % len(self.COLOR_PALETTE)]
