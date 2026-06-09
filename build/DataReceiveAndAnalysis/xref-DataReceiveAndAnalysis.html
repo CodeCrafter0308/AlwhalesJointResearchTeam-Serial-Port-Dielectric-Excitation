@@ -18,9 +18,7 @@
   <a target="code" href="///C:/Users/niwangze/Desktop/Data%20receive%20and%20analysis/main.py" type="text/plain"><tt>main.py</tt></a>
 <span class="moduletype">Script</span>  <div class="import">
 imports:
-    <a href="#PyQt6.QtCore">PyQt6.QtCore</a>
- &#8226;   <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
- &#8226;   <a href="#PyQt6.QtSerialPort">PyQt6.QtSerialPort</a>
+    <a href="#PyQt6.QtSerialPort">PyQt6.QtSerialPort</a>
  &#8226;   <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
  &#8226;   <a href="#_collections_abc">_collections_abc</a>
  &#8226;   <a href="#_weakrefset">_weakrefset</a>
@@ -168,6 +166,7 @@ imports:
  &#8226;   <a href="#pyi_rth_pyqt6.py">pyi_rth_pyqt6.py</a>
  &#8226;   <a href="#re">re</a>
  &#8226;   <a href="#reprlib">reprlib</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
  &#8226;   <a href="#sre_compile">sre_compile</a>
  &#8226;   <a href="#sre_constants">sre_constants</a>
  &#8226;   <a href="#sre_parse">sre_parse</a>
@@ -253,7 +252,9 @@ imported by:
   <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/site-packages/PyQt6/__init__.py" type="text/plain"><tt>PyQt6</tt></a>
 <span class="moduletype">Package</span>  <div class="import">
 imports:
-    <a href="#PyQt6.sip">PyQt6.sip</a>
+    <a href="#PyQt6.QtCore">PyQt6.QtCore</a>
+ &#8226;   <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
+ &#8226;   <a href="#PyQt6.sip">PyQt6.sip</a>
  &#8226;   <a href="#os">os</a>
  &#8226;   <a href="#pkgutil">pkgutil</a>
  &#8226;   <a href="#sys">sys</a>
@@ -284,10 +285,12 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
+    <a href="#PyQt6">PyQt6</a>
+ &#8226;   <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
  &#8226;   <a href="#PyQt6.QtSerialPort">PyQt6.QtSerialPort</a>
  &#8226;   <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
- &#8226;   <a href="#main.py">main.py</a>
+ &#8226;   <a href="#realtime_plot">realtime_plot</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -307,8 +310,10 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
- &#8226;   <a href="#main.py">main.py</a>
+    <a href="#PyQt6">PyQt6</a>
+ &#8226;   <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
+ &#8226;   <a href="#realtime_plot">realtime_plot</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -329,6 +334,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#main.py">main.py</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -350,6 +356,8 @@ imports:
   <div class="import">
 imported by:
     <a href="#main.py">main.py</a>
+ &#8226;   <a href="#realtime_plot">realtime_plot</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -704,6 +712,23 @@ imported by:
     <a href="#importlib._bootstrap_external">importlib._bootstrap_external</a>
  &#8226;   <a href="#io">io</a>
  &#8226;   <a href="#zipimport">zipimport</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="_json"></a>
+  <tt>_json</tt> <span class="moduletype"><i>(builtin module)</i></span>  <div class="import">
+imports:
+    <a href="#json.decoder">json.decoder</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#json.decoder">json.decoder</a>
+ &#8226;   <a href="#json.encoder">json.encoder</a>
+ &#8226;   <a href="#json.scanner">json.scanner</a>
 
   </div>
 
@@ -1521,6 +1546,7 @@ imported by:
  &#8226;   <a href="#encodings.utf_8_sig">encodings.utf_8_sig</a>
  &#8226;   <a href="#encodings.uu_codec">encodings.uu_codec</a>
  &#8226;   <a href="#encodings.zlib_codec">encodings.zlib_codec</a>
+ &#8226;   <a href="#json">json</a>
  &#8226;   <a href="#main.py">main.py</a>
  &#8226;   <a href="#pickle">pickle</a>
  &#8226;   <a href="#tokenize">tokenize</a>
@@ -1563,6 +1589,7 @@ imported by:
  &#8226;   <a href="#pkgutil">pkgutil</a>
  &#8226;   <a href="#pprint">pprint</a>
  &#8226;   <a href="#selectors">selectors</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
  &#8226;   <a href="#shutil">shutil</a>
  &#8226;   <a href="#statistics">statistics</a>
  &#8226;   <a href="#string">string</a>
@@ -1701,6 +1728,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#importlib.metadata">importlib.metadata</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -1770,6 +1798,8 @@ imports:
   <div class="import">
 imported by:
     <a href="#fractions">fractions</a>
+ &#8226;   <a href="#realtime_plot">realtime_plot</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
  &#8226;   <a href="#statistics">statistics</a>
 
   </div>
@@ -5535,6 +5565,85 @@ imported by:
 </div>
 
 <div class="node">
+  <a name="json"></a>
+  <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/json/__init__.py" type="text/plain"><tt>json</tt></a>
+<span class="moduletype">Package</span>  <div class="import">
+imports:
+    <a href="#codecs">codecs</a>
+ &#8226;   <a href="#json.decoder">json.decoder</a>
+ &#8226;   <a href="#json.encoder">json.encoder</a>
+ &#8226;   <a href="#json.scanner">json.scanner</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#json.decoder">json.decoder</a>
+ &#8226;   <a href="#json.encoder">json.encoder</a>
+ &#8226;   <a href="#json.scanner">json.scanner</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="json.decoder"></a>
+  <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/json/decoder.py" type="text/plain"><tt>json.decoder</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#_json">_json</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#json.scanner">json.scanner</a>
+ &#8226;   <a href="#re">re</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#_json">_json</a>
+ &#8226;   <a href="#json">json</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="json.encoder"></a>
+  <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/json/encoder.py" type="text/plain"><tt>json.encoder</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#_json">_json</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#re">re</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#json">json</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="json.scanner"></a>
+  <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/json/scanner.py" type="text/plain"><tt>json.scanner</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#_json">_json</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#re">re</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#json">json</a>
+ &#8226;   <a href="#json.decoder">json.decoder</a>
+
+  </div>
+
+</div>
+
+<div class="node">
   <a name="keyword"></a>
   <a target="code" href="///C:/Users/niwangze/AppData/Local/Programs/Python/Python310/lib/keyword.py" type="text/plain"><tt>keyword</tt></a>
 <span class="moduletype">SourceModule</span>  <div class="import">
@@ -5736,6 +5845,7 @@ imports:
 imported by:
     <a href="#_pydecimal">_pydecimal</a>
  &#8226;   <a href="#fractions">fractions</a>
+ &#8226;   <a href="#serial_window">serial_window</a>
  &#8226;   <a href="#statistics">statistics</a>
 
   </div>
@@ -6208,6 +6318,9 @@ imported by:
  &#8226;   <a href="#importlib.metadata._adapters">importlib.metadata._adapters</a>
  &#8226;   <a href="#importlib.metadata._text">importlib.metadata._text</a>
  &#8226;   <a href="#inspect">inspect</a>
+ &#8226;   <a href="#json.decoder">json.decoder</a>
+ &#8226;   <a href="#json.encoder">json.encoder</a>
+ &#8226;   <a href="#json.scanner">json.scanner</a>
  &#8226;   <a href="#locale">locale</a>
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#main.py">main.py</a>
@@ -6223,6 +6336,25 @@ imported by:
  &#8226;   <a href="#typing">typing</a>
  &#8226;   <a href="#urllib.parse">urllib.parse</a>
  &#8226;   <a href="#warnings">warnings</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="realtime_plot"></a>
+  <a target="code" href="///C:/Users/niwangze/Desktop/Data%20receive%20and%20analysis/realtime_plot.py" type="text/plain"><tt>realtime_plot</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#PyQt6.QtCore">PyQt6.QtCore</a>
+ &#8226;   <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
+ &#8226;   <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
+ &#8226;   <a href="#decimal">decimal</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#serial_window">serial_window</a>
 
   </div>
 
@@ -6287,6 +6419,31 @@ imports:
 imported by:
     <a href="#socket">socket</a>
  &#8226;   <a href="#subprocess">subprocess</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="serial_window"></a>
+  <a target="code" href="///C:/Users/niwangze/Desktop/Data%20receive%20and%20analysis/serial_window.py" type="text/plain"><tt>serial_window</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#PyQt6.QtCore">PyQt6.QtCore</a>
+ &#8226;   <a href="#PyQt6.QtGui">PyQt6.QtGui</a>
+ &#8226;   <a href="#PyQt6.QtSerialPort">PyQt6.QtSerialPort</a>
+ &#8226;   <a href="#PyQt6.QtWidgets">PyQt6.QtWidgets</a>
+ &#8226;   <a href="#collections">collections</a>
+ &#8226;   <a href="#csv">csv</a>
+ &#8226;   <a href="#decimal">decimal</a>
+ &#8226;   <a href="#json">json</a>
+ &#8226;   <a href="#numbers">numbers</a>
+ &#8226;   <a href="#realtime_plot">realtime_plot</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#main.py">main.py</a>
 
   </div>
 
