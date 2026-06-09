@@ -8,6 +8,7 @@ from PyQt6.QtCore import QIODeviceBase, Qt, QTimer
 from PyQt6.QtGui import QFont, QTextCursor
 from PyQt6.QtSerialPort import QSerialPort, QSerialPortInfo
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -26,6 +27,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from channel_config import ChannelConfig
+from formula_engine import FormulaError, FormulaEvaluator
 from realtime_plot import RealtimePlot
 
 
@@ -75,8 +78,12 @@ class SerialWindow(QMainWindow):
         self.current_x_key = "Freq"
         self.current_y_key = "Zi"
         self.channel_ids = ["0012"]
+        self.channel_configs = {"0012": ChannelConfig("0012")}
+        self.channel_setting_inputs = []
+        self.formula_evaluator = FormulaEvaluator()
         self.channel_id_inputs = []
         self.channel_inputs_layout = None
+        self.channel_formula_layout = None
         self.connection_dialog = None
         self.mode_dialog = None
         self.channel_dialog = None
@@ -150,7 +157,8 @@ class SerialWindow(QMainWindow):
         self.axis_status_label = QLabel("纵轴自动；横轴 Scaling，右侧留白 5")
         self._configure_widget_roles()
         self.plot = RealtimePlot()
-        self.plot.set_channels(self.channel_ids)
+        self.plot.set_channels(self.plot_series_ids())
+        self.plot.set_visible_channels(self.plot_series_ids())
         self.plot.set_title("Y=Zi / X=Freq")
         self.plot_timer = QTimer(self)
         self.plot_timer.setInterval(self.PLOT_REFRESH_INTERVAL_MS)
@@ -544,7 +552,7 @@ class SerialWindow(QMainWindow):
 
         self.channel_dialog = QDialog(self)
         self.channel_dialog.setWindowTitle("Channel Setting")
-        self.channel_dialog.resize(420, 260)
+        self.channel_dialog.resize(760, 420)
         channel_dialog_layout = QVBoxLayout(self.channel_dialog)
         channel_group = QGroupBox("Channel 设置")
         channel_layout = QVBoxLayout(channel_group)
@@ -558,6 +566,10 @@ class SerialWindow(QMainWindow):
         channel_layout.addLayout(self.channel_inputs_layout)
         channel_layout.addWidget(self.channel_status_label)
         channel_dialog_layout.addWidget(channel_group)
+
+        formula_group = QGroupBox("Channel Display & Formula")
+        self.channel_formula_layout = QGridLayout(formula_group)
+        channel_dialog_layout.addWidget(formula_group)
         self.rebuild_channel_inputs()
 
         self.curve_dialog = QDialog(self)
@@ -789,34 +801,78 @@ class SerialWindow(QMainWindow):
             QMessageBox.warning(self, "Channel 设置错误", "N_channel 必须大于等于 1。")
             return
 
-        existing_ids = [input_widget.text().strip() for input_widget in self.channel_id_inputs]
-        if not existing_ids:
-            existing_ids = self.channel_ids[:]
+        existing_configs = self._channel_configs_from_current_inputs()
 
         self._clear_layout(self.channel_inputs_layout)
+        if self.channel_formula_layout is not None:
+            self._clear_layout(self.channel_formula_layout)
+        self.channel_setting_inputs = []
         self.channel_id_inputs = []
+
+        if self.channel_formula_layout is not None:
+            formula_help = QLabel("Formula Show 用于显示公式结果；Raw Show 用于显示原始 Y 值。可用变量：x, y, value, Freq, Zr, Zi, T, H；函数：sqrt/log/log10/exp/sin/cos/tan/abs/min/max/pow")
+            self.channel_formula_layout.addWidget(formula_help, 0, 0, 1, 4)
+            headers = ("Channel", "Formula Show", "Formula", "Description")
+            for column, header in enumerate(headers):
+                self.channel_formula_layout.addWidget(QLabel(header), 1, column)
+
         for index in range(count):
             input_widget = QLineEdit()
-            if index < len(existing_ids) and existing_ids[index]:
-                input_widget.setText(existing_ids[index])
+            if index < len(existing_configs):
+                config = existing_configs[index]
             elif index == 0:
-                input_widget.setText("0012")
+                config = ChannelConfig("0012")
+            else:
+                config = ChannelConfig("")
+
+            if config.channel_id:
+                input_widget.setText(config.channel_id)
             else:
                 input_widget.setPlaceholderText(f"Channel {index + 1} ID")
 
             row_layout = QHBoxLayout()
             row_layout.addWidget(QLabel(f"Channel {index + 1} ID"))
             row_layout.addWidget(input_widget)
+            raw_visible_checkbox = QCheckBox("Raw Show")
+            raw_visible_checkbox.setChecked(config.raw_visible)
+            row_layout.addWidget(raw_visible_checkbox)
             self.channel_inputs_layout.addLayout(row_layout)
             self.channel_id_inputs.append(input_widget)
 
+            if self.channel_formula_layout is not None:
+                formula_visible_checkbox = QCheckBox()
+                formula_visible_checkbox.setChecked(config.formula_visible)
+                formula_input = QLineEdit(config.formula)
+                formula_input.setPlaceholderText("例如：Zi * 1000 或 log(abs(y))")
+                description = QLabel("y/value = 当前 Y 键原始值")
+
+                formula_row = index + 2
+                self.channel_formula_layout.addWidget(QLabel(f"Channel {index + 1}"), formula_row, 0)
+                self.channel_formula_layout.addWidget(formula_visible_checkbox, formula_row, 1)
+                self.channel_formula_layout.addWidget(formula_input, formula_row, 2)
+                self.channel_formula_layout.addWidget(description, formula_row, 3)
+
+                self.channel_setting_inputs.append(
+                    {
+                        "id": input_widget,
+                        "raw_visible": raw_visible_checkbox,
+                        "formula_visible": formula_visible_checkbox,
+                        "formula": formula_input,
+                    }
+                )
+
+        if self.channel_formula_layout is not None:
+            self.channel_formula_layout.setColumnStretch(2, 1)
+
     def apply_channel_settings(self):
-        channel_ids = self._read_channel_ids_from_inputs()
-        if channel_ids is None:
+        channel_configs = self._read_channel_configs_from_inputs()
+        if channel_configs is None:
             return
 
-        self.channel_ids = channel_ids
-        self.plot.set_channels(self.channel_ids)
+        self.channel_ids = [config.channel_id for config in channel_configs]
+        self.channel_configs = {config.channel_id: config for config in channel_configs}
+        self.plot.set_channels(self.plot_series_ids())
+        self.plot.set_visible_channels(self.plot_series_ids())
         self.rebuild_line_setting_inputs()
         self._reset_timestamp_counters()
         self.channel_status_label.setText(f"当前 Channel：{', '.join(self.channel_ids)}")
@@ -824,8 +880,20 @@ class SerialWindow(QMainWindow):
         self.apply_plot_key()
 
     def _read_channel_ids_from_inputs(self):
+        configs = self._read_channel_configs_from_inputs()
+        if configs is None:
+            return None
+        return [config.channel_id for config in configs]
+
+    def _read_channel_configs_from_inputs(self):
+        inputs = self.channel_setting_inputs or [
+            {"id": input_widget, "raw_visible": None, "formula_visible": None, "formula": None}
+            for input_widget in self.channel_id_inputs
+        ]
         channel_ids = []
-        for index, input_widget in enumerate(self.channel_id_inputs, start=1):
+        channel_configs = []
+        for index, inputs_by_channel in enumerate(inputs, start=1):
+            input_widget = inputs_by_channel["id"]
             channel_id = input_widget.text().strip()
             if not channel_id:
                 QMessageBox.warning(self, "Channel 设置错误", f"Channel {index} ID 不能为空。")
@@ -833,8 +901,74 @@ class SerialWindow(QMainWindow):
             if channel_id in channel_ids:
                 QMessageBox.warning(self, "Channel 设置错误", f"Channel ID 重复：{channel_id}")
                 return None
+
+            raw_visible_widget = inputs_by_channel.get("raw_visible")
+            formula_visible_widget = inputs_by_channel.get("formula_visible")
+            formula_widget = inputs_by_channel.get("formula")
+            raw_visible = True if raw_visible_widget is None else raw_visible_widget.isChecked()
+            formula_visible = False if formula_visible_widget is None else formula_visible_widget.isChecked()
+            formula = "" if formula_widget is None else formula_widget.text().strip()
+            if formula_visible and not formula:
+                QMessageBox.warning(self, "Channel 公式错误", f"Channel {index} 已勾选 Formula Show，但公式为空。")
+                return None
+            if formula:
+                try:
+                    self.formula_evaluator.validate(formula, self._formula_preview_names())
+                except FormulaError as exc:
+                    QMessageBox.warning(self, "Channel 公式错误", f"Channel {index} 公式无效：\n{exc}")
+                    return None
+
             channel_ids.append(channel_id)
-        return channel_ids
+            channel_configs.append(ChannelConfig(channel_id, raw_visible, formula_visible, formula))
+        return channel_configs
+
+    def _channel_configs_from_current_inputs(self):
+        configs = []
+        if self.channel_setting_inputs:
+            for inputs_by_channel in self.channel_setting_inputs:
+                channel_id = inputs_by_channel["id"].text().strip()
+                raw_visible = inputs_by_channel["raw_visible"].isChecked()
+                formula_visible = inputs_by_channel["formula_visible"].isChecked()
+                formula = inputs_by_channel["formula"].text().strip()
+                configs.append(ChannelConfig(channel_id, raw_visible, formula_visible, formula))
+            return configs
+
+        for channel_id in self.channel_ids:
+            configs.append(self.channel_configs.get(channel_id, ChannelConfig(channel_id)))
+        return configs
+
+    def _formula_preview_names(self):
+        names = {"x", "y", "value", "timestamp", "time", "Freq", "Zr", "Zi", "T", "H"}
+        for record in self.records:
+            for key, value in record["data"].items():
+                if self._is_numeric_value(value):
+                    names.add(key)
+        return names
+
+    def source_channel_ids_for_plot(self):
+        return [
+            channel_id
+            for channel_id in self.channel_ids
+            if self.channel_configs.get(channel_id, ChannelConfig(channel_id)).has_visible_series()
+        ]
+
+    def plot_series_ids(self):
+        series_ids = []
+        for channel_id in self.channel_ids:
+            config = self.channel_configs.get(channel_id, ChannelConfig(channel_id))
+            if config.raw_visible:
+                series_ids.append(self.raw_series_id(channel_id))
+            if config.formula_visible and config.formula:
+                series_ids.append(self.formula_series_id(channel_id))
+        return series_ids
+
+    @staticmethod
+    def raw_series_id(channel_id):
+        return channel_id
+
+    @staticmethod
+    def formula_series_id(channel_id):
+        return f"{channel_id} Formula"
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -856,7 +990,7 @@ class SerialWindow(QMainWindow):
         for column, header in enumerate(headers):
             self.line_settings_layout.addWidget(QLabel(header), 0, column)
 
-        for row, channel_id in enumerate(self.channel_ids, start=1):
+        for row, channel_id in enumerate(self.plot_series_ids(), start=1):
             style = self.plot.channel_style(channel_id, row - 1)
             color_combo = QComboBox()
             for color_name, color_value in self.LINE_COLORS:
@@ -1206,56 +1340,59 @@ class SerialWindow(QMainWindow):
         if channel_id not in self.channel_ids:
             self.plot_status_label.setText(f"ID={channel_id or '<无>'} 未配置为 Channel，未绘图")
             return
+        if channel_id not in self.source_channel_ids_for_plot():
+            return
 
         self.plot_record_queues.setdefault(channel_id, deque()).append(record)
         self.flush_plot_records()
 
     def flush_plot_records(self):
-        if not self.channel_ids:
+        plot_channel_ids = self.source_channel_ids_for_plot()
+        if not plot_channel_ids:
             return
 
-        while all(self.plot_record_queues.get(channel_id) for channel_id in self.channel_ids):
-            batch = self._next_synchronized_plot_batch(self.plot_record_queues)
+        while all(self.plot_record_queues.get(channel_id) for channel_id in plot_channel_ids):
+            batch = self._next_synchronized_plot_batch(self.plot_record_queues, plot_channel_ids)
             if batch is None:
                 return
             self._append_synchronized_plot_batch(batch)
 
-    def _next_synchronized_plot_batch(self, record_queues):
-        if len(self.channel_ids) == 1:
-            channel_id = self.channel_ids[0]
+    def _next_synchronized_plot_batch(self, record_queues, plot_channel_ids):
+        if len(plot_channel_ids) == 1:
+            channel_id = plot_channel_ids[0]
             return {channel_id: record_queues[channel_id].popleft()}
 
         head_keys = {
             channel_id: self._record_sync_key(record_queues[channel_id][0])
-            for channel_id in self.channel_ids
+            for channel_id in plot_channel_ids
         }
         if any(sync_key is None for sync_key in head_keys.values()):
             return {
                 channel_id: record_queues[channel_id].popleft()
-                for channel_id in self.channel_ids
+                for channel_id in plot_channel_ids
             }
 
         if len(set(head_keys.values())) == 1:
             return {
                 channel_id: record_queues[channel_id].popleft()
-                for channel_id in self.channel_ids
+                for channel_id in plot_channel_ids
             }
 
-        sync_key = self._best_common_sync_key(record_queues)
+        sync_key = self._best_common_sync_key(record_queues, plot_channel_ids)
         if sync_key is None:
-            if all(len(record_queues[channel_id]) >= self.PLOT_SYNC_LOOKAHEAD for channel_id in self.channel_ids):
-                self._drop_oldest_queued_record(record_queues)
+            if all(len(record_queues[channel_id]) >= self.PLOT_SYNC_LOOKAHEAD for channel_id in plot_channel_ids):
+                self._drop_oldest_queued_record(record_queues, plot_channel_ids)
             return None
 
-        self._discard_records_before_sync_key(record_queues, sync_key)
+        self._discard_records_before_sync_key(record_queues, plot_channel_ids, sync_key)
         return {
             channel_id: record_queues[channel_id].popleft()
-            for channel_id in self.channel_ids
+            for channel_id in plot_channel_ids
         }
 
-    def _best_common_sync_key(self, record_queues):
+    def _best_common_sync_key(self, record_queues, plot_channel_ids):
         positions_by_channel = {}
-        for channel_id in self.channel_ids:
+        for channel_id in plot_channel_ids:
             positions = {}
             for position, record in enumerate(record_queues[channel_id]):
                 if position >= self.PLOT_SYNC_LOOKAHEAD:
@@ -1274,14 +1411,14 @@ class SerialWindow(QMainWindow):
         return min(
             common_keys,
             key=lambda sync_key: (
-                max(positions_by_channel[channel_id][sync_key] for channel_id in self.channel_ids),
-                sum(positions_by_channel[channel_id][sync_key] for channel_id in self.channel_ids),
+                max(positions_by_channel[channel_id][sync_key] for channel_id in plot_channel_ids),
+                sum(positions_by_channel[channel_id][sync_key] for channel_id in plot_channel_ids),
             ),
         )
 
-    def _discard_records_before_sync_key(self, record_queues, sync_key):
+    def _discard_records_before_sync_key(self, record_queues, plot_channel_ids, sync_key):
         dropped = 0
-        for channel_id in self.channel_ids:
+        for channel_id in plot_channel_ids:
             while record_queues[channel_id] and self._record_sync_key(record_queues[channel_id][0]) != sync_key:
                 record_queues[channel_id].popleft()
                 dropped += 1
@@ -1289,9 +1426,9 @@ class SerialWindow(QMainWindow):
             self.plot_sync_drop_count += dropped
             self.plot_status_label.setText(f"已按 {self.PLOT_SYNC_KEY} 重新同步，丢弃错位记录 {self.plot_sync_drop_count} 条")
 
-    def _drop_oldest_queued_record(self, record_queues):
+    def _drop_oldest_queued_record(self, record_queues, plot_channel_ids):
         channel_id = min(
-            self.channel_ids,
+            plot_channel_ids,
             key=lambda candidate: record_queues[candidate][0].get("sequence", 0),
         )
         record_queues[channel_id].popleft()
@@ -1314,8 +1451,8 @@ class SerialWindow(QMainWindow):
             self.plot_status_label.setText(f"当前曲线：{', '.join(missing)} 不是可绘制数字")
             return
 
-        for channel_id, x_value, y_value in points:
-            self.plot.add_point(channel_id, x_value, y_value)
+        for series_id, x_value, y_value in points:
+            self.plot.add_point(series_id, x_value, y_value)
 
         self.plot_status_label.setText(
             f"同步绘图：Sample={sample_index}，Channel={len(points)}，"
@@ -1325,8 +1462,8 @@ class SerialWindow(QMainWindow):
     def _batch_plot_values(self, batch, x_key, y_key, sample_index):
         points = []
         missing = []
-        for channel_id in self.channel_ids:
-            record = batch[channel_id]
+        for channel_id, record in batch.items():
+            config = self.channel_configs.get(channel_id, ChannelConfig(channel_id))
             x_value = self._record_numeric_value(record, x_key, sample_index)
             y_value = self._record_numeric_value(record, y_key, sample_index)
 
@@ -1334,11 +1471,45 @@ class SerialWindow(QMainWindow):
                 missing.append(f"ID={channel_id} X={x_key}")
             if y_value is None:
                 missing.append(f"ID={channel_id} Y={y_key}")
-            points.append((channel_id, x_value, y_value))
+            if x_value is not None and y_value is not None:
+                if config.raw_visible:
+                    points.append((self.raw_series_id(channel_id), x_value, y_value))
+                if config.formula_visible and config.formula:
+                    formula_value = self._apply_channel_formula(record, x_value, y_value)
+                    if formula_value is None:
+                        missing.append(f"ID={channel_id} Formula")
+                    else:
+                        points.append((self.formula_series_id(channel_id), x_value, formula_value))
 
         if missing:
             return [], missing
         return points, []
+
+    def _apply_channel_formula(self, record, x_value, y_value):
+        channel_id = record["channel_id"]
+        config = self.channel_configs.get(channel_id)
+        if config is None or not config.formula:
+            return y_value
+
+        variables = self._formula_variables(record, x_value, y_value)
+        try:
+            return self.formula_evaluator.evaluate(config.formula, variables)
+        except FormulaError as exc:
+            self.plot_status_label.setText(f"ID={channel_id} 公式错误：{exc}")
+            return None
+
+    def _formula_variables(self, record, x_value, y_value):
+        variables = {
+            "x": x_value,
+            "y": y_value,
+            "value": y_value,
+            "timestamp": record["timestamp"],
+            "time": record["timestamp"],
+        }
+        for key, value in record["data"].items():
+            if self._is_numeric_value(value):
+                variables[key] = float(value)
+        return variables
 
     def _record_numeric_value(self, record, key, sample_index=None):
         normalized_key = key.strip()
@@ -1362,15 +1533,17 @@ class SerialWindow(QMainWindow):
         if not y_key:
             QMessageBox.warning(self, "键名为空", "请输入要作为 Y 轴绘图的 JSON 键名。")
             return
-        channel_ids = self._read_channel_ids_from_inputs()
-        if channel_ids is None:
+        channel_configs = self._read_channel_configs_from_inputs()
+        if channel_configs is None:
             return
 
-        self.channel_ids = channel_ids
+        self.channel_ids = [config.channel_id for config in channel_configs]
+        self.channel_configs = {config.channel_id: config for config in channel_configs}
         self.current_x_key = x_key
         self.current_y_key = y_key
         self.x_key_input.setText(x_key)
-        self.plot.set_channels(self.channel_ids)
+        self.plot.set_channels(self.plot_series_ids())
+        self.plot.set_visible_channels(self.plot_series_ids())
         self.rebuild_line_setting_inputs()
         self.plot.set_title(f"Y={y_key} / X={x_key}")
         channel_points = self._synchronized_channel_points_from_records(x_key, y_key)
@@ -1382,22 +1555,23 @@ class SerialWindow(QMainWindow):
         )
 
     def _synchronized_channel_points_from_records(self, x_key, y_key):
-        record_queues = {channel_id: deque() for channel_id in self.channel_ids}
+        plot_channel_ids = self.source_channel_ids_for_plot()
+        record_queues = {channel_id: deque() for channel_id in plot_channel_ids}
         for record in self.records:
             channel_id = record["channel_id"]
             if channel_id in record_queues:
                 record_queues[channel_id].append(record)
 
-        channel_points = {channel_id: [] for channel_id in self.channel_ids}
+        channel_points = {series_id: [] for series_id in self.plot_series_ids()}
         sample_index = 0
-        while all(record_queues[channel_id] for channel_id in self.channel_ids):
-            batch = self._next_synchronized_plot_batch(record_queues)
+        while plot_channel_ids and all(record_queues[channel_id] for channel_id in plot_channel_ids):
+            batch = self._next_synchronized_plot_batch(record_queues, plot_channel_ids)
             if batch is None:
                 break
             points, missing = self._batch_plot_values(batch, x_key, y_key, sample_index)
             if not missing:
-                for channel_id, x_value, y_value in points:
-                    channel_points[channel_id].append((x_value, y_value))
+                for series_id, x_value, y_value in points:
+                    channel_points[series_id].append((x_value, y_value))
             sample_index += 1
 
         self.plot_record_queues = record_queues
@@ -1455,11 +1629,12 @@ class SerialWindow(QMainWindow):
             file_path += ".csv"
 
         try:
+            visible_channel_ids = self.plot_series_ids()
             with open(file_path, "w", newline="", encoding="utf-8-sig") as csv_file:
                 writer = csv.writer(csv_file)
                 writer.writerow(
                     [self.current_x_key]
-                    + [f"{channel_id}_{self.current_y_key}" for channel_id in self.channel_ids]
+                    + [f"{channel_id}_{self.current_y_key}" for channel_id in visible_channel_ids]
                 )
                 for x_value, y_values_by_channel in self._wide_csv_rows(points):
                     writer.writerow(
@@ -1468,7 +1643,7 @@ class SerialWindow(QMainWindow):
                             self._format_csv_number(y_values_by_channel[channel_id])
                             if channel_id in y_values_by_channel
                             else ""
-                            for channel_id in self.channel_ids
+                            for channel_id in visible_channel_ids
                         ]
                     )
         except OSError as exc:
@@ -1530,7 +1705,7 @@ class SerialWindow(QMainWindow):
         self.record_sequence = 0
         self.plot_sync_drop_count = 0
         self._reset_timestamp_counters()
-        self.plot_record_queues = {channel_id: deque() for channel_id in self.channel_ids}
+        self.plot_record_queues = {channel_id: deque() for channel_id in self.source_channel_ids_for_plot()}
         self.plot_sample_index = 0
         self.plot.clear()
 

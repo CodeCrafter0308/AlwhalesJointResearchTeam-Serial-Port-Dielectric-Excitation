@@ -30,6 +30,7 @@ class RealtimePlot(QWidget):
         self.series = {}
         self.next_sequence = {}
         self.channel_styles = {}
+        self.visible_channels = set()
         self.title = "等待选择键"
         self.y_min_override = None
         self.y_max_override = None
@@ -50,6 +51,7 @@ class RealtimePlot(QWidget):
             self.series.setdefault(channel_id, [])
             self.next_sequence.setdefault(channel_id, 0)
             self.channel_styles.setdefault(channel_id, self._default_channel_style(channel_index))
+            self.visible_channels.add(channel_id)
 
         allowed = set(channel_ids)
         for channel_id in list(self.series):
@@ -57,6 +59,11 @@ class RealtimePlot(QWidget):
                 del self.series[channel_id]
                 self.next_sequence.pop(channel_id, None)
                 self.channel_styles.pop(channel_id, None)
+                self.visible_channels.discard(channel_id)
+        self.update()
+
+    def set_visible_channels(self, channel_ids):
+        self.visible_channels = set(channel_ids)
         self.update()
 
     def set_channel_style(self, channel_id, color=None, line_style=None, width=None):
@@ -144,7 +151,7 @@ class RealtimePlot(QWidget):
         data_by_channel = {
             channel_id: list(points)
             for channel_id, points in self.series.items()
-            if points
+            if points and channel_id in self.visible_channels
         }
         if not data_by_channel:
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "等待可绘制的数值数据")
@@ -221,7 +228,7 @@ class RealtimePlot(QWidget):
         data_by_channel = {
             channel_id: list(points)
             for channel_id, points in self.series.items()
-            if points
+            if points and channel_id in self.visible_channels
         }
         if not data_by_channel:
             return []
