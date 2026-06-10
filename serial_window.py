@@ -3,6 +3,8 @@ import json
 from collections import deque
 from decimal import Decimal, InvalidOperation
 from numbers import Real
+from pathlib import Path
+import sys
 
 from PyQt6.QtCore import QIODeviceBase, Qt, QTimer
 from PyQt6.QtGui import QFont, QTextCursor
@@ -18,15 +20,23 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from bluetooth_serial import (
+    merge_bluetooth_devices,
+    scan_local_bluetooth_serial_devices,
+)
+from ble_backend import BleDeviceRecord, BleManager
 from channel_config import ChannelConfig
 from formula_engine import FormulaError, FormulaEvaluator
 from realtime_plot import RealtimePlot
@@ -85,6 +95,26 @@ class SerialWindow(QMainWindow):
         self.channel_inputs_layout = None
         self.channel_formula_layout = None
         self.connection_dialog = None
+        self.connection_mode_combo = None
+        self.connection_pages = None
+        self.active_connection_mode = None
+        self.bluetooth_devices = {}
+        self.bluetooth_scan_button = None
+        self.bluetooth_connect_button = None
+        self.bluetooth_disconnect_button = None
+        self.bluetooth_device_list = None
+        self.bluetooth_status_label = None
+        self.bluetooth_serial_candidates = []
+        self.bluetooth_hide_unknown_checkbox = None
+        self.bluetooth_last_devices = []
+        self.bluetooth_tabs = None
+        self.bluetooth_service_view = None
+        self.bluetooth_received_view = None
+        self.bluetooth_send_input = None
+        self.bluetooth_data_transmit_button = None
+        self.bluetooth_send_button = None
+        self.bluetooth_clear_received_button = None
+        self.ble_manager = BleManager(self)
         self.mode_dialog = None
         self.channel_dialog = None
         self.curve_dialog = None
@@ -102,24 +132,52 @@ class SerialWindow(QMainWindow):
         self.stop_bits_combo = QComboBox()
         self.data_bits_combo = QComboBox()
         self.parity_combo = QComboBox()
-        self.refresh_button = QPushButton("刷新串口")
-        self.open_button = QPushButton("打开串口")
-        self.close_button = QPushButton("关闭串口")
-        self.clear_button = QPushButton("清空数据")
-        self.status_label = QLabel("串口未打开")
+        self.refresh_button = QPushButton("Refresh Ports")
+        self.open_button = QPushButton("Open Serial")
+        self.close_button = QPushButton("Close Serial")
+        self.clear_button = QPushButton("Clear Data")
+        self.status_label = QLabel("Serial Closed")
         self.raw_view = QPlainTextEdit()
         self.parsed_view = QPlainTextEdit()
+        self.connection_mode_combo = QComboBox()
+        self.connection_mode_combo.addItem("Serial Port - JSON", "serial")
+        self.connection_mode_combo.addItem("BLE - RFBMS02 - JSON", "bluetooth")
+        self.bluetooth_scan_button = QPushButton("Scan BLE")
+        self.bluetooth_connect_button = QPushButton("Connect Selected")
+        self.bluetooth_disconnect_button = QPushButton("Disconnect")
+        self.bluetooth_device_list = QListWidget()
+        self.bluetooth_status_label = QLabel("BLE Disconnected")
+        self.bluetooth_hide_unknown_checkbox = QCheckBox("Hide Unknown")
+        self.bluetooth_hide_unknown_checkbox.setChecked(True)
+        self.bluetooth_tabs = QTabWidget()
+        self.bluetooth_service_view = QPlainTextEdit()
+        self.bluetooth_received_view = QPlainTextEdit()
+        self.bluetooth_send_input = QPlainTextEdit()
+        self.bluetooth_data_transmit_button = QPushButton("Data Transmit")
+        self.bluetooth_data_transmit_button.setEnabled(False)
+        self.bluetooth_send_button = QPushButton("Send")
+        self.bluetooth_clear_received_button = QPushButton("Clear")
         data_font = QFont("Consolas", 10)
         data_font.setStyleHint(QFont.StyleHint.Monospace)
         self.raw_view.setFont(data_font)
         self.parsed_view.setFont(data_font)
-        self.connection_button = QPushButton("Connection")
+        self.connection_button = QComboBox()
+        self.connection_button.setPlaceholderText("Connection")
+        self.connection_button.addItem("Serial Port - JSON", "serial")
+        self.connection_button.addItem("BLE - RFBMS02 - JSON", "bluetooth")
+        self.connection_button.setCurrentIndex(-1)
         self.mode_setting_button = QPushButton("Mode Setting")
         self.channel_setting_button = QPushButton("Channel Setting")
         self.curve_setting_button = QComboBox()
         self.curve_setting_button.setPlaceholderText("Plot Options")
         self.curve_setting_button.addItems(("Coordinate Setting", "Line Setting"))
         self.curve_setting_button.setCurrentIndex(-1)
+        nav_font = QFont("Microsoft YaHei UI", 12)
+        nav_font.setBold(True)
+        for widget in (self.connection_button, self.mode_setting_button, self.channel_setting_button, self.curve_setting_button):
+            widget.setFont(nav_font)
+            widget.setMinimumWidth(178)
+            widget.setMaximumWidth(210)
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItem("扫频", 0)
         self.scan_mode_combo.addItem("定频", 1)
@@ -129,7 +187,7 @@ class SerialWindow(QMainWindow):
         self.sweep_step_frequency_input = QLineEdit("1000")
         self.apply_mode_button = QPushButton("Apply Mode")
         self.apply_mode_button.setEnabled(False)
-        self.mode_status_label = QLabel("请先打开串口")
+        self.mode_status_label = QLabel("Open Serial or BLE first")
         self.x_key_input = QLineEdit(self.current_x_key)
         self.key_input = QLineEdit(self.current_y_key)
         self.plot_key_button = QPushButton("绘制曲线")
@@ -172,6 +230,7 @@ class SerialWindow(QMainWindow):
         self.refresh_ports()
 
     def _apply_industrial_theme(self):
+        nav_arrow = self._asset_path("dropdown_arrow.svg").as_posix()
         self.setStyleSheet(
             """
             QMainWindow, QDialog {
@@ -302,9 +361,34 @@ class SerialWindow(QMainWindow):
                 background: #f8fafc;
                 border-color: #b8c3d1;
                 font-size: 12pt;
+                font-weight: 700;
                 min-height: 38px;
                 text-align: left;
                 min-width: 136px;
+            }
+            QComboBox#navCombo {
+                background: #f8fafc;
+                border: 1px solid #b8c3d1;
+                border-radius: 2px;
+                color: #162235;
+                font-size: 12pt;
+                font-weight: 700;
+                min-height: 38px;
+                min-width: 178px;
+                padding: 2px 34px 2px 12px;
+            }
+            QComboBox#navCombo:hover {
+                border-color: #64748b;
+                background: #ffffff;
+            }
+            QComboBox#navCombo::drop-down {
+                width: 28px;
+                border-left: 1px solid #c8d2df;
+            }
+            QComboBox#navCombo::down-arrow {
+                image: url("__NAV_ARROW__");
+                width: 12px;
+                height: 8px;
             }
             QStatusBar {
                 background: #162235;
@@ -312,13 +396,22 @@ class SerialWindow(QMainWindow):
                 border-top: 1px solid #0f172a;
             }
             """
+            .replace("__NAV_ARROW__", nav_arrow)
         )
 
+    @staticmethod
+    def _asset_path(filename):
+        base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return base_dir / "assets" / filename
+
     def _configure_widget_roles(self):
-        for button in (self.connection_button, self.mode_setting_button, self.channel_setting_button):
+        self.connection_button.setObjectName("navCombo")
+        self.curve_setting_button.setObjectName("navCombo")
+        for button in (self.mode_setting_button, self.channel_setting_button):
             button.setObjectName("navButton")
         for button in (
             self.open_button,
+            self.bluetooth_connect_button,
             self.apply_mode_button,
             self.plot_key_button,
             self.apply_axis_button,
@@ -327,6 +420,7 @@ class SerialWindow(QMainWindow):
         ):
             button.setObjectName("primaryButton")
         self.close_button.setObjectName("dangerButton")
+        self.bluetooth_disconnect_button.setObjectName("dangerButton")
 
     def _set_system_state(self, online, detail):
         self.system_state_label.setText("ONLINE" if online else "OFFLINE")
@@ -459,12 +553,34 @@ class SerialWindow(QMainWindow):
         self.raw_view.setMaximumBlockCount(2000)
         self.parsed_view.setReadOnly(True)
         self.parsed_view.setMaximumBlockCount(200)
+        self.bluetooth_service_view.setReadOnly(True)
+        self.bluetooth_received_view.setReadOnly(True)
+        self.bluetooth_received_view.setMaximumBlockCount(2000)
         self.close_button.setEnabled(False)
+        self.bluetooth_disconnect_button.setEnabled(False)
 
         self.refresh_button.clicked.connect(self.refresh_ports)
         self.open_button.clicked.connect(self.open_serial)
         self.close_button.clicked.connect(self.close_serial)
         self.clear_button.clicked.connect(self.clear_data)
+        self.connection_mode_combo.currentIndexChanged.connect(self.update_connection_mode_page)
+        self.bluetooth_scan_button.clicked.connect(self.scan_bluetooth_devices)
+        self.bluetooth_connect_button.clicked.connect(self.connect_selected_bluetooth_device)
+        self.bluetooth_disconnect_button.clicked.connect(self.close_bluetooth)
+        self.bluetooth_device_list.itemDoubleClicked.connect(self.connect_bluetooth_item)
+        self.bluetooth_hide_unknown_checkbox.stateChanged.connect(self.refresh_bluetooth_device_list)
+        self.ble_manager.scan_started.connect(self.on_ble_scan_started)
+        self.ble_manager.scan_finished.connect(self.on_ble_scan_finished)
+        self.ble_manager.status_changed.connect(self.on_ble_status_changed)
+        self.ble_manager.services_ready.connect(self.on_ble_services_ready)
+        self.ble_manager.transmit_started.connect(self.on_ble_transmit_started)
+        self.ble_manager.connected.connect(self.on_ble_connected)
+        self.ble_manager.disconnected.connect(self.on_ble_disconnected)
+        self.ble_manager.data_received.connect(self.on_ble_data_received)
+        self.ble_manager.error.connect(self.on_ble_error)
+        self.bluetooth_data_transmit_button.clicked.connect(self.start_ble_data_transmit)
+        self.bluetooth_send_button.clicked.connect(self.send_ble_text)
+        self.bluetooth_clear_received_button.clicked.connect(self.bluetooth_received_view.clear)
         self.plot_key_button.clicked.connect(self.apply_plot_key)
         self.clear_plot_button.clicked.connect(self.confirm_clear_plot)
         self.save_data_button.clicked.connect(self.save_plot_data)
@@ -475,7 +591,7 @@ class SerialWindow(QMainWindow):
         self.apply_axis_button.clicked.connect(self.apply_axis_settings)
         self.apply_line_style_button.clicked.connect(self.apply_line_settings)
         self.x_mode_combo.currentTextChanged.connect(self.update_axis_input_state)
-        self.connection_button.clicked.connect(self.show_connection_dialog)
+        self.connection_button.activated.connect(self.show_connection_option)
         self.mode_setting_button.clicked.connect(self.show_mode_dialog)
         self.channel_setting_button.clicked.connect(self.show_channel_dialog)
         self.curve_setting_button.activated.connect(self.show_plot_option)
@@ -491,18 +607,23 @@ class SerialWindow(QMainWindow):
         self.connection_dialog.resize(700, 760)
         connection_layout = QVBoxLayout(self.connection_dialog)
 
-        settings_group = QGroupBox("串口设置")
+        mode_group = QGroupBox("Connection Mode")
+        mode_layout = QHBoxLayout(mode_group)
+        mode_layout.addWidget(QLabel("Data Source"))
+        mode_layout.addWidget(self.connection_mode_combo, 1)
+
+        settings_group = QGroupBox("Serial Port - JSON")
         settings_layout = QGridLayout(settings_group)
-        settings_layout.addWidget(QLabel("串口"), 0, 0)
+        settings_layout.addWidget(QLabel("Serial Port"), 0, 0)
         settings_layout.addWidget(self.port_combo, 0, 1)
         settings_layout.addWidget(self.refresh_button, 0, 2)
-        settings_layout.addWidget(QLabel("波特率"), 1, 0)
+        settings_layout.addWidget(QLabel("Baud Rate"), 1, 0)
         settings_layout.addWidget(self.baud_combo, 1, 1)
-        settings_layout.addWidget(QLabel("停止位"), 2, 0)
+        settings_layout.addWidget(QLabel("Stop Bits"), 2, 0)
         settings_layout.addWidget(self.stop_bits_combo, 2, 1)
-        settings_layout.addWidget(QLabel("数据位"), 3, 0)
+        settings_layout.addWidget(QLabel("Data Bits"), 3, 0)
         settings_layout.addWidget(self.data_bits_combo, 3, 1)
-        settings_layout.addWidget(QLabel("校验位"), 4, 0)
+        settings_layout.addWidget(QLabel("Parity"), 4, 0)
         settings_layout.addWidget(self.parity_combo, 4, 1)
 
         serial_buttons = QHBoxLayout()
@@ -512,7 +633,67 @@ class SerialWindow(QMainWindow):
         serial_buttons.addStretch()
         serial_buttons.addWidget(self.status_label)
 
-        raw_group = QGroupBox("串口接收原始信息")
+        serial_page = QWidget()
+        serial_page_layout = QVBoxLayout(serial_page)
+        serial_page_layout.setContentsMargins(0, 0, 0, 0)
+        serial_page_layout.addWidget(settings_group)
+        serial_page_layout.addLayout(serial_buttons)
+
+        bluetooth_group = QGroupBox("BLE - RFBMS02 - JSON")
+        bluetooth_layout = QVBoxLayout(bluetooth_group)
+
+        device_page = QWidget()
+        device_layout = QVBoxLayout(device_page)
+        bluetooth_button_layout = QHBoxLayout()
+        bluetooth_button_layout.addWidget(self.bluetooth_scan_button)
+        bluetooth_button_layout.addWidget(self.bluetooth_connect_button)
+        bluetooth_button_layout.addWidget(self.bluetooth_disconnect_button)
+        bluetooth_button_layout.addWidget(self.bluetooth_hide_unknown_checkbox)
+        bluetooth_button_layout.addStretch()
+        bluetooth_button_layout.addWidget(self.bluetooth_status_label)
+        device_layout.addLayout(bluetooth_button_layout)
+        device_layout.addWidget(QLabel("Device: scan BLE devices, then double-click the target device to enter Service."))
+        device_layout.addWidget(self.bluetooth_device_list)
+
+        service_page = QWidget()
+        service_layout = QVBoxLayout(service_page)
+        service_layout.addWidget(QLabel("Service: GATT services and characteristics discovered after connection."))
+        service_layout.addWidget(self.bluetooth_service_view)
+        service_button_layout = QHBoxLayout()
+        service_button_layout.addStretch()
+        service_button_layout.addWidget(self.bluetooth_data_transmit_button)
+        service_layout.addLayout(service_button_layout)
+
+        data_page = QWidget()
+        data_layout = QVBoxLayout(data_page)
+        data_columns = QHBoxLayout()
+        received_layout = QVBoxLayout()
+        received_layout.addWidget(QLabel("Received Data:"))
+        received_layout.addWidget(self.bluetooth_received_view)
+        received_layout.addWidget(self.bluetooth_clear_received_button)
+        send_layout = QVBoxLayout()
+        send_layout.addWidget(QLabel("Send Data:"))
+        send_layout.addWidget(self.bluetooth_send_input)
+        send_layout.addWidget(self.bluetooth_send_button)
+        data_columns.addLayout(received_layout, 1)
+        data_columns.addLayout(send_layout, 1)
+        data_layout.addLayout(data_columns)
+
+        self.bluetooth_tabs.addTab(device_page, "Device")
+        self.bluetooth_tabs.addTab(service_page, "Service")
+        self.bluetooth_tabs.addTab(data_page, "Data Transmit")
+        bluetooth_layout.addWidget(self.bluetooth_tabs)
+
+        bluetooth_page = QWidget()
+        bluetooth_page_layout = QVBoxLayout(bluetooth_page)
+        bluetooth_page_layout.setContentsMargins(0, 0, 0, 0)
+        bluetooth_page_layout.addWidget(bluetooth_group)
+
+        self.connection_pages = QStackedWidget()
+        self.connection_pages.addWidget(serial_page)
+        self.connection_pages.addWidget(bluetooth_page)
+
+        raw_group = QGroupBox("原始接收信息")
         raw_layout = QVBoxLayout(raw_group)
         raw_layout.addWidget(self.raw_view)
 
@@ -522,8 +703,8 @@ class SerialWindow(QMainWindow):
         parsed_layout.setContentsMargins(10, 12, 10, 10)
         parsed_layout.addWidget(self.parsed_view)
 
-        connection_layout.addWidget(settings_group)
-        connection_layout.addLayout(serial_buttons)
+        connection_layout.addWidget(mode_group)
+        connection_layout.addWidget(self.connection_pages)
         connection_layout.addWidget(raw_group, 1)
         connection_layout.addWidget(parsed_group, 1)
 
@@ -686,8 +867,8 @@ class SerialWindow(QMainWindow):
         self.sweep_step_frequency_input.setEnabled(not is_fixed)
 
     def send_mode_setting(self):
-        if not self.serial.isOpen():
-            QMessageBox.warning(self, "串口未打开", "请先打开串口，再发送 Mode Setting。")
+        if not self._is_data_connection_open():
+            QMessageBox.warning(self, "连接未打开", "请先打开串口或蓝牙连接，再发送 Mode Setting。")
             return
 
         payload = self._mode_setting_payload()
@@ -695,12 +876,14 @@ class SerialWindow(QMainWindow):
             return
 
         command = f"{payload}\n".encode("utf-8")
-        bytes_written = self.serial.write(command)
+        bytes_written = self._write_data_connection(command)
         if bytes_written == -1:
-            QMessageBox.critical(self, "发送失败", self.serial.errorString())
+            message = self.serial.errorString() if self.serial.isOpen() else "BLE 设备没有可写 Characteristic，无法发送命令。"
+            QMessageBox.critical(self, "发送失败", message)
             return
 
-        self.serial.flush()
+        if self.serial.isOpen():
+            self.serial.flush()
         self.mode_status_label.setText(f"已发送：{payload}")
         self.raw_view.appendPlainText(f"\n[TX] {payload}")
 
@@ -750,6 +933,16 @@ class SerialWindow(QMainWindow):
     def _format_protocol_frequency(frequency_hz):
         return SerialWindow._format_csv_number(frequency_hz / Decimal("1000"))
 
+    def show_connection_option(self, index):
+        if index < 0:
+            return
+        mode = self.connection_button.itemData(index)
+        page_index = self.connection_mode_combo.findData(mode)
+        if page_index >= 0:
+            self.connection_mode_combo.setCurrentIndex(page_index)
+        self.show_connection_dialog()
+        self.connection_button.setCurrentIndex(-1)
+
     def show_connection_dialog(self):
         self._show_dialog(self.connection_dialog)
 
@@ -776,6 +969,31 @@ class SerialWindow(QMainWindow):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def update_connection_mode_page(self, index):
+        if self.connection_pages is None:
+            return
+        self.connection_pages.setCurrentIndex(index)
+
+    def _selected_connection_mode(self):
+        if self.connection_mode_combo is None:
+            return "serial"
+        return self.connection_mode_combo.currentData() or "serial"
+
+    def _connection_display_name(self):
+        if self.active_connection_mode == "ble":
+            return "BLE"
+        return "蓝牙" if self.active_connection_mode == "bluetooth" else "串口"
+
+    def _is_data_connection_open(self):
+        return self.serial.isOpen() or self.ble_manager.is_connected
+
+    def _write_data_connection(self, payload):
+        if self.serial.isOpen():
+            return self.serial.write(payload)
+        if self.ble_manager.is_connected:
+            return len(payload) if self.ble_manager.write(payload) else -1
+        return -1
 
     def _load_options(self):
         for baud in (9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600):
@@ -1171,9 +1389,9 @@ class SerialWindow(QMainWindow):
             self.port_combo.addItem(label, port.portName())
 
         if self.port_combo.count() == 0:
-            self.port_combo.addItem("未发现串口", None)
+            self.port_combo.addItem("No serial port detected", None)
             self.open_button.setEnabled(False)
-            self.status_label.setText("未发现可用串口")
+            self.status_label.setText("No serial port detected")
             self._set_system_state(False, "No serial port detected")
             return
 
@@ -1181,9 +1399,244 @@ class SerialWindow(QMainWindow):
         index = self.port_combo.findData(current)
         if index >= 0:
             self.port_combo.setCurrentIndex(index)
-        self.status_label.setText("串口未打开")
+        self.status_label.setText("Serial Closed")
         if not self.serial.isOpen():
             self._set_system_state(False, "Serial port ready to open")
+
+    def scan_bluetooth_devices(self):
+        self.bluetooth_device_list.clear()
+        self.bluetooth_devices = {}
+        self.bluetooth_last_devices = []
+        self.bluetooth_service_view.clear()
+        self.bluetooth_received_view.clear()
+        self.bluetooth_data_transmit_button.setEnabled(False)
+        self.bluetooth_tabs.setCurrentIndex(0)
+        self.bluetooth_serial_candidates = scan_local_bluetooth_serial_devices()
+        self.ble_manager.start_scan(timeout=12.0)
+
+    def on_ble_scan_started(self):
+        self.bluetooth_status_label.setText("正在扫描 BLE 设备...")
+        self.bluetooth_scan_button.setEnabled(False)
+        self.raw_view.appendPlainText("\n[INFO] 正在按 LightBlue 工作流扫描 BLE 广播设备...")
+
+    def on_ble_scan_finished(self, ble_devices, message):
+        devices = merge_bluetooth_devices(self.bluetooth_serial_candidates, ble_devices)
+        self.finish_bluetooth_scan(devices, message)
+
+    def finish_bluetooth_scan(self, devices, message=""):
+        self.bluetooth_scan_button.setEnabled(True)
+        self.bluetooth_last_devices = list(devices)
+        self.refresh_bluetooth_device_list()
+        if devices and self.bluetooth_hide_unknown_checkbox.isChecked() and self.bluetooth_device_list.count() == 0:
+            self.bluetooth_hide_unknown_checkbox.setChecked(False)
+            self.refresh_bluetooth_device_list()
+
+        if not devices:
+            self.bluetooth_status_label.setText("未发现蓝牙设备")
+            self.raw_view.appendPlainText(
+                "\n[INFO] 未发现蓝牙设备。请确认 Windows 蓝牙已打开，并且目标设备处于可发现或已配对状态。"
+            )
+            if message:
+                self.raw_view.appendPlainText(f"[INFO] {message}")
+            return
+
+        serial_count = sum(1 for device in devices if device.can_open_serial)
+        ble_count = sum(1 for device in devices if isinstance(device, BleDeviceRecord))
+        named_ble_count = sum(
+            1 for device in devices if isinstance(device, BleDeviceRecord) and bool(device.name)
+        )
+        visible_count = self.bluetooth_device_list.count()
+        self.bluetooth_status_label.setText(
+            f"发现 {len(devices)} 个蓝牙设备，显示 {visible_count} 个，BLE {ble_count} 个，其中有名称 {named_ble_count} 个，串口 {serial_count} 个"
+        )
+        self.raw_view.appendPlainText(
+            f"\n[INFO] 已发现 {len(devices)} 个蓝牙设备，当前显示 {visible_count} 个；"
+            f"其中 BLE {ble_count} 个，有名称 BLE {named_ble_count} 个，蓝牙串口 {serial_count} 个。"
+        )
+        if message:
+            self.raw_view.appendPlainText(f"[INFO] {message}")
+
+    def refresh_bluetooth_device_list(self):
+        self.bluetooth_device_list.clear()
+        self.bluetooth_devices = {}
+        hide_unknown = self.bluetooth_hide_unknown_checkbox.isChecked()
+
+        for device in self.bluetooth_last_devices:
+            if hide_unknown and isinstance(device, BleDeviceRecord) and not device.name:
+                continue
+            self.bluetooth_devices[device.key] = device
+            item = QListWidgetItem(device.display_name)
+            item.setData(Qt.ItemDataRole.UserRole, device.key)
+            if isinstance(device, BleDeviceRecord):
+                item.setToolTip("BLE 设备：双击后连接 GATT，并自动订阅 Notify/Indicate Characteristic。")
+            elif not device.can_open_serial:
+                item.setToolTip("Windows 能识别该蓝牙设备名称，但它尚未映射为可读取的 COM 串口。")
+            self.bluetooth_device_list.addItem(item)
+
+        if self.bluetooth_last_devices:
+            total_count = len(self.bluetooth_last_devices)
+            serial_count = sum(1 for device in self.bluetooth_last_devices if device.can_open_serial)
+            ble_count = sum(1 for device in self.bluetooth_last_devices if isinstance(device, BleDeviceRecord))
+            named_ble_count = sum(
+                1 for device in self.bluetooth_last_devices if isinstance(device, BleDeviceRecord) and bool(device.name)
+            )
+            self.bluetooth_status_label.setText(
+                f"发现 {total_count} 个蓝牙设备，显示 {self.bluetooth_device_list.count()} 个，"
+                f"BLE {ble_count} 个，其中有名称 {named_ble_count} 个，串口 {serial_count} 个"
+            )
+
+    def connect_selected_bluetooth_device(self):
+        item = self.bluetooth_device_list.currentItem()
+        if item is None:
+            QMessageBox.warning(self, "未选择蓝牙设备", "请先扫描并选择一个蓝牙设备。")
+            return
+        self.connect_bluetooth_item(item)
+
+    def connect_bluetooth_item(self, item):
+        device_key = item.data(Qt.ItemDataRole.UserRole)
+        device = self.bluetooth_devices.get(device_key)
+        if device is None:
+            QMessageBox.warning(self, "蓝牙设备无效", "该蓝牙设备记录已失效，请重新扫描。")
+            return
+        if isinstance(device, BleDeviceRecord):
+            if self.serial.isOpen():
+                self.close_serial()
+            self.bluetooth_status_label.setText(f"正在连接 BLE：{device.name or device.address}")
+            self.bluetooth_connect_button.setEnabled(False)
+            self.bluetooth_disconnect_button.setEnabled(True)
+            self.bluetooth_service_view.setPlainText("正在获取 GATT Service...")
+            self.bluetooth_received_view.clear()
+            self.ble_manager.connect_device(device.address)
+            return
+
+        if not device.can_open_serial:
+            QMessageBox.warning(
+                self,
+                "蓝牙设备无法直接读取",
+                "Windows 已识别该蓝牙设备名称，但它没有映射为 COM 串口。\n\n"
+                "当前程序读取的是设备发送的串口文本/JSON 数据，因此目标设备需要提供 SPP/RFCOMM "
+                "蓝牙串口服务，或在 Windows 中创建对应的传入/传出 COM 端口。\n\n"
+                "如果目标设备是 BLE 设备，则需要提供 BLE Service UUID 和 Characteristic UUID，"
+                "再按 BLE 通知方式读取。",
+            )
+            return
+
+        if self.serial.isOpen():
+            self.close_serial()
+
+        if not self._open_serial_port(device.port_name, "bluetooth"):
+            return
+
+        self.connection_mode_combo.setCurrentIndex(self.connection_mode_combo.findData("bluetooth"))
+        self.bluetooth_connect_button.setEnabled(False)
+        self.bluetooth_disconnect_button.setEnabled(True)
+        self.bluetooth_status_label.setText(f"已连接：{device.display_name}")
+        self.raw_view.appendPlainText(f"\n[INFO] 已连接蓝牙设备 {device.display_name}")
+
+    def close_bluetooth(self):
+        if self.active_connection_mode == "bluetooth":
+            self.close_serial()
+        else:
+            self.ble_manager.disconnect()
+            self.bluetooth_status_label.setText("正在断开 BLE...")
+
+    def on_ble_status_changed(self, message):
+        self.bluetooth_status_label.setText(message)
+        self.statusBar().showMessage(message)
+
+    def on_ble_connected(self, message):
+        self.active_connection_mode = "ble"
+        self.apply_mode_button.setEnabled(self.ble_manager.has_write_characteristic)
+        self.bluetooth_connect_button.setEnabled(False)
+        self.bluetooth_disconnect_button.setEnabled(True)
+        self.bluetooth_status_label.setText(message)
+        self.mode_status_label.setText(
+            "BLE 已连接，可发送 Mode Setting" if self.ble_manager.has_write_characteristic else "BLE 已连接，但未发现可写 Characteristic"
+        )
+        self._set_system_state(True, message)
+        self.raw_view.appendPlainText(f"\n[INFO] {message}")
+
+    def on_ble_services_ready(self, services_info, connected_name):
+        self.bluetooth_service_view.setPlainText(self._format_ble_services(services_info))
+        self.bluetooth_data_transmit_button.setEnabled(True)
+        self.bluetooth_tabs.setCurrentIndex(1)
+        if connected_name:
+            self.bluetooth_status_label.setText(f"Service Ready：{connected_name}")
+        else:
+            self.bluetooth_status_label.setText("Service Ready")
+
+    def start_ble_data_transmit(self):
+        if not self.ble_manager.is_connected:
+            QMessageBox.warning(self, "BLE 未连接", "请先在 Device 页双击目标设备并等待 Service 完成。")
+            return
+        self.bluetooth_status_label.setText("正在启动 Data Transmit...")
+        self.ble_manager.start_data_transmit()
+
+    def on_ble_transmit_started(self, message):
+        self.bluetooth_tabs.setCurrentIndex(2)
+        self.bluetooth_status_label.setText(message)
+        self.raw_view.appendPlainText(f"\n[INFO] {message}")
+
+    def on_ble_data_received(self, text):
+        self.bluetooth_received_view.moveCursor(QTextCursor.MoveOperation.End)
+        self.bluetooth_received_view.insertPlainText(text)
+        self.bluetooth_received_view.moveCursor(QTextCursor.MoveOperation.End)
+        self._handle_incoming_text(text)
+
+    def send_ble_text(self):
+        text = self.bluetooth_send_input.toPlainText()
+        if not text:
+            return
+        if not text.endswith("\n"):
+            text += "\n"
+        if not self.ble_manager.write(text.encode("utf-8")):
+            QMessageBox.warning(self, "BLE 发送失败", "没有可写 Characteristic，无法发送数据。")
+            return
+        self.raw_view.appendPlainText(f"\n[BLE TX] {text.rstrip()}")
+
+    def _format_ble_services(self, services_info):
+        lines = []
+        for service in services_info:
+            service_uuid = self._short_ble_uuid(service.get("uuid", ""))
+            description = service.get("description", "")
+            lines.append(f"{service_uuid}{f'  {description}' if description else ''}")
+            for characteristic in service.get("characteristics", []):
+                char_uuid = self._short_ble_uuid(characteristic.get("uuid", ""))
+                properties = ", ".join(characteristic.get("properties", []))
+                char_description = characteristic.get("description", "")
+                detail = f"    {char_uuid}"
+                if properties:
+                    detail += f"  [{properties}]"
+                if char_description:
+                    detail += f"  {char_description}"
+                lines.append(detail)
+        return "\n".join(lines) if lines else "未发现 GATT Service"
+
+    @staticmethod
+    def _short_ble_uuid(uuid):
+        text = str(uuid).lower()
+        if text.startswith("0000") and text.endswith("-0000-1000-8000-00805f9b34fb"):
+            return f"0x{text[4:8]}"
+        return text
+
+    def on_ble_disconnected(self, message):
+        if self.active_connection_mode == "ble":
+            self.active_connection_mode = None
+            self.apply_mode_button.setEnabled(False)
+            self.bluetooth_connect_button.setEnabled(True)
+            self.bluetooth_disconnect_button.setEnabled(False)
+            self.bluetooth_data_transmit_button.setEnabled(False)
+            self.bluetooth_status_label.setText("BLE Disconnected")
+            self.mode_status_label.setText("Open Serial or BLE first")
+            self._set_system_state(False, message)
+            self.raw_view.appendPlainText(f"\n[INFO] {message}")
+
+    def on_ble_error(self, message):
+        self.bluetooth_connect_button.setEnabled(True)
+        self.bluetooth_disconnect_button.setEnabled(False)
+        self.bluetooth_status_label.setText(message)
+        self.raw_view.appendPlainText(f"\n[ERROR] {message}")
+        QMessageBox.warning(self, "BLE 错误", message)
 
     def open_serial(self):
         port_name = self.port_combo.currentData()
@@ -1191,6 +1644,15 @@ class SerialWindow(QMainWindow):
             QMessageBox.warning(self, "无法打开串口", "请先选择一个有效串口。")
             return
 
+        if self.ble_manager.is_connected:
+            self.ble_manager.disconnect()
+
+        if self.serial.isOpen():
+            self.close_serial()
+
+        self._open_serial_port(port_name, "serial")
+
+    def _open_serial_port(self, port_name, connection_mode):
         self.serial.setPortName(port_name)
         self.serial.setBaudRate(self.baud_combo.currentData())
         self.serial.setDataBits(self.data_bits_combo.currentData())
@@ -1199,29 +1661,50 @@ class SerialWindow(QMainWindow):
         self.serial.setFlowControl(QSerialPort.FlowControl.NoFlowControl)
 
         if not self.serial.open(QIODeviceBase.OpenModeFlag.ReadWrite):
-            QMessageBox.critical(self, "打开串口失败", self.serial.errorString())
-            return
+            title = "打开蓝牙失败" if connection_mode == "bluetooth" else "打开串口失败"
+            QMessageBox.critical(self, title, self.serial.errorString())
+            return False
 
+        self.active_connection_mode = connection_mode
         self._set_controls_enabled(False)
         self.open_button.setEnabled(False)
         self.close_button.setEnabled(True)
         self.apply_mode_button.setEnabled(True)
-        self.status_label.setText(f"已打开：{port_name}")
-        self._set_system_state(True, f"Serial port opened: {port_name}")
-        self.raw_view.appendPlainText(f"[INFO] 已打开串口 {port_name}")
+        self.mode_status_label.setText("连接已打开，可发送 Mode Setting")
+        if connection_mode == "bluetooth":
+            self.bluetooth_connect_button.setEnabled(False)
+            self.bluetooth_disconnect_button.setEnabled(True)
+            self.bluetooth_status_label.setText(f"已连接：{port_name}")
+            self.status_label.setText("Serial Closed")
+            detail = f"Bluetooth serial opened: {port_name}"
+            self.raw_view.appendPlainText(f"[INFO] 已打开蓝牙串口 {port_name}")
+        else:
+            self.bluetooth_connect_button.setEnabled(True)
+            self.bluetooth_disconnect_button.setEnabled(False)
+            self.bluetooth_status_label.setText("BLE Disconnected")
+            self.status_label.setText(f"Opened: {port_name}")
+            detail = f"Serial port opened: {port_name}"
+            self.raw_view.appendPlainText(f"[INFO] Serial port opened: {port_name}")
+        self._set_system_state(True, detail)
+        return True
 
     def close_serial(self):
         if self.serial.isOpen():
             port_name = self.serial.portName()
+            connection_name = self._connection_display_name()
             self.serial.close()
-            self.raw_view.appendPlainText(f"\n[INFO] 已关闭串口 {port_name}")
+            self.raw_view.appendPlainText(f"\n[INFO] 已关闭{connection_name} {port_name}")
 
+        self.active_connection_mode = None
         self._set_controls_enabled(True)
         self.open_button.setEnabled(self.port_combo.currentData() is not None)
         self.close_button.setEnabled(False)
+        self.bluetooth_connect_button.setEnabled(True)
+        self.bluetooth_disconnect_button.setEnabled(False)
         self.apply_mode_button.setEnabled(False)
-        self.mode_status_label.setText("请先打开串口")
-        self.status_label.setText("串口未打开")
+        self.mode_status_label.setText("Open Serial or BLE first")
+        self.status_label.setText("Serial Closed")
+        self.bluetooth_status_label.setText("BLE Disconnected")
         self._set_system_state(False, "Serial port closed")
 
     def read_serial_data(self):
@@ -1230,6 +1713,9 @@ class SerialWindow(QMainWindow):
             return
 
         text = raw.decode("utf-8", errors="replace")
+        self._handle_incoming_text(text)
+
+    def _handle_incoming_text(self, text):
         self._append_raw_text(text)
         self.json_buffer += text
         self._consume_json_buffer()
@@ -1718,5 +2204,6 @@ class SerialWindow(QMainWindow):
         self.refresh_button.setEnabled(enabled)
 
     def closeEvent(self, event):
+        self.ble_manager.disconnect()
         self.close_serial()
         event.accept()
