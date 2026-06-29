@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from PyQt6.QtCore import QIODeviceBase, Qt, QTimer
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtGui import QFont, QIcon, QTextCursor
 from PyQt6.QtSerialPort import QSerialPort, QSerialPortInfo
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QPlainTextEdit,
     QStackedWidget,
@@ -116,6 +117,7 @@ class SerialWindow(QMainWindow):
         self.bluetooth_clear_received_button = None
         self.ble_manager = BleManager(self)
         self.mode_dialog = None
+        self.excitation_setting_pages = None
         self.channel_dialog = None
         self.curve_dialog = None
         self.plot_option_combo = None
@@ -124,6 +126,7 @@ class SerialWindow(QMainWindow):
         self.line_style_inputs = {}
 
         self.setWindowTitle("Sensor Data Acquisition & Analysis Console")
+        self.setWindowIcon(QIcon(str(self._asset_path("app_icon.ico"))))
         self.resize(1280, 820)
         self._apply_industrial_theme()
 
@@ -166,7 +169,10 @@ class SerialWindow(QMainWindow):
         self.connection_button.addItem("Serial Port - JSON", "serial")
         self.connection_button.addItem("BLE - RFBMS02 - JSON", "bluetooth")
         self.connection_button.setCurrentIndex(-1)
-        self.mode_setting_button = QPushButton("Mode Setting")
+        self.mode_setting_button = QComboBox()
+        self.mode_setting_button.setPlaceholderText("Excitation Setting")
+        self.mode_setting_button.addItems(("Sweep Mode Setting", "Heat Setting"))
+        self.mode_setting_button.setCurrentIndex(-1)
         self.channel_setting_button = QPushButton("Channel Setting")
         self.curve_setting_button = QComboBox()
         self.curve_setting_button.setPlaceholderText("Plot Options")
@@ -178,6 +184,8 @@ class SerialWindow(QMainWindow):
             widget.setFont(nav_font)
             widget.setMinimumWidth(178)
             widget.setMaximumWidth(210)
+        self.mode_setting_button.setMinimumWidth(205)
+        self.mode_setting_button.setMaximumWidth(250)
         self.scan_mode_combo = QComboBox()
         self.scan_mode_combo.addItem("扫频", 0)
         self.scan_mode_combo.addItem("定频", 1)
@@ -188,6 +196,15 @@ class SerialWindow(QMainWindow):
         self.apply_mode_button = QPushButton("Apply Mode")
         self.apply_mode_button.setEnabled(False)
         self.mode_status_label = QLabel("Open Serial or BLE first")
+        self.heat_pwm_input = QLineEdit("0.3")
+        self.heat_charge_bar = QProgressBar()
+        self.heat_charge_bar.setObjectName("heatChargeBar")
+        self.heat_charge_bar.setRange(0, 1000)
+        self.heat_charge_bar.setTextVisible(True)
+        self.heat_charge_bar.setMinimumHeight(30)
+        self.apply_heat_button = QPushButton("Apply Heat")
+        self.apply_heat_button.setEnabled(False)
+        self.heat_status_label = QLabel("Open Serial or BLE first")
         self.x_key_input = QLineEdit(self.current_x_key)
         self.key_input = QLineEdit(self.current_y_key)
         self.plot_key_button = QPushButton("绘制曲线")
@@ -226,6 +243,7 @@ class SerialWindow(QMainWindow):
         self._build_modular_ui()
         self._load_options()
         self.update_mode_input_state()
+        self.update_heat_charge_bar()
         self.update_axis_input_state()
         self.refresh_ports()
 
@@ -320,6 +338,19 @@ class SerialWindow(QMainWindow):
                 padding: 8px;
                 background: #fbfdff;
             }
+            QProgressBar#heatChargeBar {
+                min-height: 30px;
+                border: 1px solid #94a3b8;
+                border-radius: 3px;
+                background: #ffffff;
+                color: #0f172a;
+                text-align: center;
+                font-weight: 700;
+            }
+            QProgressBar#heatChargeBar::chunk {
+                background: #22c55e;
+                border-radius: 2px;
+            }
             QPushButton {
                 min-height: 30px;
                 padding: 4px 14px;
@@ -406,13 +437,15 @@ class SerialWindow(QMainWindow):
 
     def _configure_widget_roles(self):
         self.connection_button.setObjectName("navCombo")
+        self.mode_setting_button.setObjectName("navCombo")
         self.curve_setting_button.setObjectName("navCombo")
-        for button in (self.mode_setting_button, self.channel_setting_button):
+        for button in (self.channel_setting_button,):
             button.setObjectName("navButton")
         for button in (
             self.open_button,
             self.bluetooth_connect_button,
             self.apply_mode_button,
+            self.apply_heat_button,
             self.plot_key_button,
             self.apply_axis_button,
             self.apply_channels_button,
@@ -592,15 +625,18 @@ class SerialWindow(QMainWindow):
         self.apply_line_style_button.clicked.connect(self.apply_line_settings)
         self.x_mode_combo.currentTextChanged.connect(self.update_axis_input_state)
         self.connection_button.activated.connect(self.show_connection_option)
-        self.mode_setting_button.clicked.connect(self.show_mode_dialog)
+        self.mode_setting_button.activated.connect(self.show_excitation_option)
         self.channel_setting_button.clicked.connect(self.show_channel_dialog)
         self.curve_setting_button.activated.connect(self.show_plot_option)
         self.scan_mode_combo.currentIndexChanged.connect(self.update_mode_input_state)
         self.apply_mode_button.clicked.connect(self.send_mode_setting)
+        self.apply_heat_button.clicked.connect(self.send_heat_setting)
         self.fixed_frequency_input.returnPressed.connect(self.send_mode_setting)
         self.sweep_lower_frequency_input.returnPressed.connect(self.send_mode_setting)
         self.sweep_upper_frequency_input.returnPressed.connect(self.send_mode_setting)
         self.sweep_step_frequency_input.returnPressed.connect(self.send_mode_setting)
+        self.heat_pwm_input.textChanged.connect(self.update_heat_charge_bar)
+        self.heat_pwm_input.returnPressed.connect(self.send_heat_setting)
 
         self.connection_dialog = QDialog(self)
         self.connection_dialog.setWindowTitle("Connection")
@@ -709,10 +745,15 @@ class SerialWindow(QMainWindow):
         connection_layout.addWidget(parsed_group, 1)
 
         self.mode_dialog = QDialog(self)
-        self.mode_dialog.setWindowTitle("Mode Setting")
-        self.mode_dialog.resize(580, 180)
+        self.mode_dialog.setWindowTitle("Excitation Setting")
+        self.mode_dialog.resize(620, 280)
         mode_dialog_layout = QVBoxLayout(self.mode_dialog)
-        mode_group = QGroupBox("Mode Setting")
+        self.excitation_setting_pages = QStackedWidget()
+        mode_dialog_layout.addWidget(self.excitation_setting_pages, 1)
+
+        sweep_page = QWidget()
+        sweep_page_layout = QVBoxLayout(sweep_page)
+        mode_group = QGroupBox("Sweep Mode Setting")
         mode_layout = QGridLayout(mode_group)
         mode_layout.addWidget(QLabel("模式"), 0, 0)
         mode_layout.addWidget(self.scan_mode_combo, 0, 1)
@@ -728,8 +769,25 @@ class SerialWindow(QMainWindow):
         mode_layout.addWidget(self.mode_status_label, 2, 3)
         mode_layout.setColumnStretch(1, 1)
         mode_layout.setColumnStretch(3, 1)
-        mode_dialog_layout.addWidget(mode_group)
-        mode_dialog_layout.addStretch()
+        sweep_page_layout.addWidget(mode_group)
+        sweep_page_layout.addStretch()
+        self.excitation_setting_pages.addWidget(sweep_page)
+
+        heat_page = QWidget()
+        heat_page_layout = QVBoxLayout(heat_page)
+        heat_group = QGroupBox("Heat Setting")
+        heat_layout = QGridLayout(heat_group)
+        heat_layout.addWidget(QLabel("PWM Duty Cycle"), 0, 0)
+        heat_layout.addWidget(self.heat_pwm_input, 0, 1)
+        heat_layout.addWidget(QLabel("Charge"), 1, 0)
+        heat_layout.addWidget(self.heat_charge_bar, 1, 1)
+        heat_layout.addWidget(QLabel("Sensor heater voltage = 3.3 V * PWM duty cycle"), 2, 0, 1, 2)
+        heat_layout.addWidget(self.apply_heat_button, 3, 0)
+        heat_layout.addWidget(self.heat_status_label, 3, 1)
+        heat_layout.setColumnStretch(1, 1)
+        heat_page_layout.addWidget(heat_group)
+        heat_page_layout.addStretch()
+        self.excitation_setting_pages.addWidget(heat_page)
 
         self.channel_dialog = QDialog(self)
         self.channel_dialog.setWindowTitle("Channel Setting")
@@ -804,7 +862,7 @@ class SerialWindow(QMainWindow):
         header_text_layout = QVBoxLayout()
         header_title = QLabel("Sensor Data Acquisition & Analysis Console")
         header_title.setObjectName("appTitle")
-        header_subtitle = QLabel("Serial acquisition | Mode control | Real-time synchronized plotting")
+        header_subtitle = QLabel("Serial acquisition | Excitation control | Real-time synchronized plotting")
         header_subtitle.setObjectName("appSubtitle")
         header_text_layout.addWidget(header_title)
         header_text_layout.addWidget(header_subtitle)
@@ -866,29 +924,71 @@ class SerialWindow(QMainWindow):
         self.sweep_upper_frequency_input.setEnabled(not is_fixed)
         self.sweep_step_frequency_input.setEnabled(not is_fixed)
 
+    def update_heat_charge_bar(self):
+        text = self.heat_pwm_input.text().strip()
+        if not text:
+            self.heat_charge_bar.setValue(0)
+            self.heat_charge_bar.setFormat("0%")
+            return
+
+        try:
+            duty_cycle = Decimal(text)
+        except InvalidOperation:
+            self.heat_charge_bar.setValue(0)
+            self.heat_charge_bar.setFormat("Invalid")
+            return
+
+        if duty_cycle < 0 or duty_cycle > 1:
+            self.heat_charge_bar.setValue(0)
+            self.heat_charge_bar.setFormat("Invalid")
+            return
+
+        bar_value = int(duty_cycle * Decimal("1000"))
+        percent = duty_cycle * Decimal("100")
+        self.heat_charge_bar.setValue(bar_value)
+        self.heat_charge_bar.setFormat(f"{self._format_csv_number(percent)}%")
+
     def send_mode_setting(self):
         if not self._is_data_connection_open():
-            QMessageBox.warning(self, "连接未打开", "请先打开串口或蓝牙连接，再发送 Mode Setting。")
+            QMessageBox.warning(self, "Connection Closed", "Open Serial or BLE before sending Sweep Mode Setting.")
             return
 
         payload = self._mode_setting_payload()
         if payload is None:
             return
 
+        self._send_data_connection_command(payload, self.mode_status_label)
+
+    def send_heat_setting(self):
+        if not self._is_data_connection_open():
+            QMessageBox.warning(self, "Connection Closed", "Open Serial or BLE before sending Heat Setting.")
+            return
+
+        duty_cycle = self._parse_pwm_duty_cycle(self.heat_pwm_input)
+        if duty_cycle is None:
+            return
+
+        payload = f"set -pwm {self._format_csv_number(duty_cycle)}"
+        if self._send_data_connection_command(payload, self.heat_status_label):
+            heater_voltage = self._format_csv_number(duty_cycle * Decimal("3.3"))
+            self.heat_status_label.setText(f"Sent: {payload} ({heater_voltage} V)")
+
+    def _send_data_connection_command(self, payload, status_label):
         command = f"{payload}\n".encode("utf-8")
         bytes_written = self._write_data_connection(command)
         if bytes_written == -1:
-            message = self.serial.errorString() if self.serial.isOpen() else "BLE 设备没有可写 Characteristic，无法发送命令。"
-            QMessageBox.critical(self, "发送失败", message)
-            return
+            message = self.serial.errorString() if self.serial.isOpen() else "BLE device has no writable characteristic."
+            QMessageBox.critical(self, "Send Failed", message)
+            return False
 
         if self.serial.isOpen():
             self.serial.flush()
-        self.mode_status_label.setText(f"已发送：{payload}")
+        status_label.setText(f"Sent: {payload}")
         self.raw_view.appendPlainText(f"\n[TX] {payload}")
 
         if bytes_written != len(command):
-            QMessageBox.warning(self, "发送未完成", f"仅写入 {bytes_written}/{len(command)} 字节。")
+            QMessageBox.warning(self, "Send Incomplete", f"Only wrote {bytes_written}/{len(command)} bytes.")
+        return True
 
     def _mode_setting_payload(self):
         mode = self.scan_mode_combo.currentData()
@@ -904,7 +1004,7 @@ class SerialWindow(QMainWindow):
         if lower is None or upper is None or step is None:
             return None
         if lower >= upper:
-            QMessageBox.warning(self, "Mode Setting 错误", "扫频下限必须小于扫频上限。")
+            QMessageBox.warning(self, "Sweep Mode Setting Error", "The sweep lower frequency must be less than the upper frequency.")
             return None
 
         return (
@@ -912,6 +1012,22 @@ class SerialWindow(QMainWindow):
             f"-e {self._format_protocol_frequency(upper)} "
             f"-i {self._format_protocol_frequency(step)}"
         )
+
+    @staticmethod
+    def _parse_pwm_duty_cycle(input_widget):
+        text = input_widget.text().strip()
+        if not text:
+            QMessageBox.warning(input_widget, "Input Error", "PWM duty cycle cannot be empty.")
+            return None
+        try:
+            value = Decimal(text)
+        except InvalidOperation:
+            QMessageBox.warning(input_widget, "Input Error", "PWM duty cycle must be a number.")
+            return None
+        if value < 0 or value > 1:
+            QMessageBox.warning(input_widget, "Input Error", "PWM duty cycle must be between 0 and 1.")
+            return None
+        return value
 
     @staticmethod
     def _parse_required_frequency_hz(input_widget, name):
@@ -946,8 +1062,15 @@ class SerialWindow(QMainWindow):
     def show_connection_dialog(self):
         self._show_dialog(self.connection_dialog)
 
-    def show_mode_dialog(self):
+    def show_excitation_option(self, index):
+        if index < 0 or self.mode_dialog is None or self.excitation_setting_pages is None:
+            return
+
+        option_name = self.mode_setting_button.itemText(index)
+        self.excitation_setting_pages.setCurrentIndex(index)
+        self.mode_dialog.setWindowTitle(option_name)
         self._show_dialog(self.mode_dialog)
+        self.mode_setting_button.setCurrentIndex(-1)
 
     def show_channel_dialog(self):
         self._show_dialog(self.channel_dialog)
@@ -1547,11 +1670,15 @@ class SerialWindow(QMainWindow):
     def on_ble_connected(self, message):
         self.active_connection_mode = "ble"
         self.apply_mode_button.setEnabled(self.ble_manager.has_write_characteristic)
+        self.apply_heat_button.setEnabled(self.ble_manager.has_write_characteristic)
         self.bluetooth_connect_button.setEnabled(False)
         self.bluetooth_disconnect_button.setEnabled(True)
         self.bluetooth_status_label.setText(message)
         self.mode_status_label.setText(
-            "BLE 已连接，可发送 Mode Setting" if self.ble_manager.has_write_characteristic else "BLE 已连接，但未发现可写 Characteristic"
+            "BLE connected; Sweep Mode Setting can be sent" if self.ble_manager.has_write_characteristic else "BLE connected, but no writable characteristic was found"
+        )
+        self.heat_status_label.setText(
+            "BLE connected; Heat Setting can be sent" if self.ble_manager.has_write_characteristic else "BLE connected, but no writable characteristic was found"
         )
         self._set_system_state(True, message)
         self.raw_view.appendPlainText(f"\n[INFO] {message}")
@@ -1623,11 +1750,13 @@ class SerialWindow(QMainWindow):
         if self.active_connection_mode == "ble":
             self.active_connection_mode = None
             self.apply_mode_button.setEnabled(False)
+            self.apply_heat_button.setEnabled(False)
             self.bluetooth_connect_button.setEnabled(True)
             self.bluetooth_disconnect_button.setEnabled(False)
             self.bluetooth_data_transmit_button.setEnabled(False)
             self.bluetooth_status_label.setText("BLE Disconnected")
             self.mode_status_label.setText("Open Serial or BLE first")
+            self.heat_status_label.setText("Open Serial or BLE first")
             self._set_system_state(False, message)
             self.raw_view.appendPlainText(f"\n[INFO] {message}")
 
@@ -1670,7 +1799,9 @@ class SerialWindow(QMainWindow):
         self.open_button.setEnabled(False)
         self.close_button.setEnabled(True)
         self.apply_mode_button.setEnabled(True)
-        self.mode_status_label.setText("连接已打开，可发送 Mode Setting")
+        self.apply_heat_button.setEnabled(True)
+        self.mode_status_label.setText("Connection open; Sweep Mode Setting can be sent")
+        self.heat_status_label.setText("Connection open; Heat Setting can be sent")
         if connection_mode == "bluetooth":
             self.bluetooth_connect_button.setEnabled(False)
             self.bluetooth_disconnect_button.setEnabled(True)
@@ -1702,7 +1833,9 @@ class SerialWindow(QMainWindow):
         self.bluetooth_connect_button.setEnabled(True)
         self.bluetooth_disconnect_button.setEnabled(False)
         self.apply_mode_button.setEnabled(False)
+        self.apply_heat_button.setEnabled(False)
         self.mode_status_label.setText("Open Serial or BLE first")
+        self.heat_status_label.setText("Open Serial or BLE first")
         self.status_label.setText("Serial Closed")
         self.bluetooth_status_label.setText("BLE Disconnected")
         self._set_system_state(False, "Serial port closed")
